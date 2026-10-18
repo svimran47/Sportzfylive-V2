@@ -33,6 +33,8 @@ class AppConfigParserTest {
               "adBlocking": false,
               "extraBlockedHosts": ["*.Bad-Ads.com.", "evil.net", "has space.com", "a/b"],
               "playerMode": "iframe",
+              "embedSandbox": false,
+              "embedResolve": false,
               "minVersionCode": 3,
               "updateUrl": "https://github.com/svimran46/Sportzfylive-V2/releases",
               "maintenance": {"enabled": true, "message": "Back at 9pm"}
@@ -44,6 +46,8 @@ class AppConfigParserTest {
         assertFalse(config.adBlocking)
         assertEquals(setOf("bad-ads.com", "evil.net"), config.extraBlockedHosts)
         assertEquals(PlayerMode.IFRAME, config.playerMode)
+        assertFalse(config.embedSandbox)
+        assertFalse(config.embedResolve)
         assertEquals("Back at 9pm", config.maintenanceMessage)
         assertTrue(config.requiresUpdate(2))
         assertFalse(config.requiresUpdate(3))
@@ -83,6 +87,20 @@ class AppConfigParserTest {
         assertEquals(null, parse("""{"streamProxyUrl":""}""")!!.streamProxyUrl)
         assertEquals("https://proxy.example", parse("""{"streamProxyUrl":"https://proxy.example"}""")!!.streamProxyUrl)
         assertEquals(AppConfig.DEFAULT_STREAM_PROXY_URL, parse("""{"streamProxyUrl":"http://insecure.example"}""")!!.streamProxyUrl)
+    }
+
+    @Test
+    fun `embeds are sandboxed by default and only an explicit false turns it off`() {
+        assertTrue(parse("{}")!!.embedSandbox)
+        assertTrue(parse("""{"embedSandbox":true}""")!!.embedSandbox)
+        assertFalse(parse("""{"embedSandbox":false}""")!!.embedSandbox)
+    }
+
+    @Test
+    fun `match pages are resolved to the native player by default`() {
+        assertTrue(parse("{}")!!.embedResolve)
+        assertTrue(parse("""{"embedResolve":true}""")!!.embedResolve)
+        assertFalse(parse("""{"embedResolve":false}""")!!.embedResolve)
     }
 
     @Test

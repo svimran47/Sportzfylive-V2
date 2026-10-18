@@ -37,6 +37,10 @@ import org.koin.compose.koinInject
  *
  * [textureSurface] draws into a TextureView instead of a SurfaceView, so the
  * video can be clipped, moved and resized with the layout (the floating TV player).
+ *
+ * [requestHeaders] are replayed on the media request. A URL resolved out of an
+ * embed page is often tied to the headers that page sent (a Referer or a
+ * session cookie), so the same ones are sent again.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -46,6 +50,7 @@ internal fun MediaPlayerView(
     state: StreamPlayerState,
     modifier: Modifier = Modifier,
     textureSurface: Boolean = false,
+    requestHeaders: Map<String, String> = emptyMap(),
     okHttpClient: OkHttpClient = koinInject(),
 ) {
     val context = LocalContext.current
@@ -100,13 +105,16 @@ internal fun MediaPlayerView(
         onDispose { lifecycleOwner.lifecycle.removeObserver(lifecycleObserver) }
     }
 
-    LaunchedEffect(player, url, format, state.reloadToken) {
-        player.setMediaItem(
-            MediaItem.Builder()
-                .setUri(url)
-                .setMimeType(format.mimeType())
-                .build()
-        )
+    LaunchedEffect(player, url, format, state.reloadToken, requestHeaders) {
+        val mediaItem = MediaItem.Builder()
+            .setUri(url)
+            .setMimeType(format.mimeType())
+            .build()
+        // Built per item so a resolved stream's headers apply to it alone; the
+        // player is reused across streams and must not keep the last ones.
+        val dataSourceFactory = OkHttpDataSource.Factory(okHttpClient)
+            .setDefaultRequestProperties(requestHeaders)
+        player.setMediaSource(DefaultMediaSourceFactory(dataSourceFactory).createMediaSource(mediaItem))
         player.prepare()
         player.playWhenReady = true
     }

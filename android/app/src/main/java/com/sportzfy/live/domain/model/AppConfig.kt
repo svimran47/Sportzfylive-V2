@@ -14,8 +14,9 @@ data class AppConfig(
     /** Sports removed from the catalog entirely. */
     val hiddenCategories: Set<SportCategory> = emptySet(),
     /**
-     * Built-in ad-network blocking in the player. Off by default: the stream
-     * sites are paid for by their ads and won't play while they're blocked.
+     * Built-in ad-network blocking in the player: their frames, images and
+     * beacons are refused while their scripts still load, so the player keeps
+     * working. Off by default.
      */
     val adBlocking: Boolean = false,
     /** Extra hosts the player refuses, on top of (or instead of) the built-in list. */
@@ -25,6 +26,22 @@ data class AppConfig(
      * which is how Live TV channels already play.
      */
     val playerMode: PlayerMode = PlayerMode.DIRECT,
+    /**
+     * Runs embedded stream pages in a sandboxed iframe: pop-ups, top-level
+     * navigation, downloads and pointer lock are refused by the frame itself,
+     * not only by the WebView. The embed's anti-sandbox check passes because
+     * the WebView never lets `window.open` answer `null`. On by default; turn
+     * it off for a stream that refuses to play inside a sandbox.
+     */
+    val embedSandbox: Boolean = true,
+    /**
+     * Plays `embed.st` match pages in the app's own player: a hidden WebView
+     * resolves the real media URL, then Media3 takes over (no web player, no
+     * ads, picture-in-picture, background audio). On by default; a stream the
+     * resolver can't work out still falls back to the web player. Turn it off
+     * to always use the web player.
+     */
+    val embedResolve: Boolean = true,
     /** Builds older than this show an "update required" screen. */
     val minVersionCode: Int = 0,
     val updateUrl: String? = null,

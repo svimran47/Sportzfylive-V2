@@ -30,10 +30,12 @@ import com.sportzfy.live.domain.model.PlayerMode
  * Plays any stream page or embed URL. In [PlayerMode.DIRECT] (the default)
  * it is the WebView's page itself, like a browser tab; in [PlayerMode.IFRAME]
  * it runs in a plain, unsandboxed iframe inside a wrapper page, like the
- * website. Either way the page stays on [url]'s host and pop-ups are trapped
- * (see [createSandboxedWebView]).
+ * website. When [PlayerConfig.sandboxed] is set it uses the iframe wrapper
+ * with a `sandbox` attribute, so the frame itself refuses pop-ups, top-level
+ * navigation and downloads. Either way the page stays on [url]'s host and
+ * pop-ups are trapped (see [createSandboxedWebView]).
  *
- * The WebView is created once and reused: a new [url], mode or
+ * The WebView is created once and reused: a new [url], mode, sandbox or
  * [StreamPlayerState.retry] reloads the same instance, so switching streams
  * never rebuilds the surrounding layout. A fresh WebView is created only
  * after its renderer process dies.
@@ -141,10 +143,19 @@ internal fun EmbedPlayerView(
             },
             update = { view ->
                 val webView = view as? WebView ?: return@AndroidView
-                val request = LoadRequest(url, state.reloadToken, config.mode)
+                val request = LoadRequest(url, state.reloadToken, config.mode, config.sandboxed)
                 if (webView.tag != request) {
                     webView.tag = request
-                    if (config.mode == PlayerMode.IFRAME) {
+                    if (config.sandboxed) {
+                        holder.landing.clear()
+                        webView.loadDataWithBaseURL(
+                            EmbedFrame.SANDBOX_BASE_URL,
+                            EmbedFrame.html(url, EmbedFrame.SANDBOX),
+                            "text/html",
+                            "utf-8",
+                            null,
+                        )
+                    } else if (config.mode == PlayerMode.IFRAME) {
                         holder.landing.clear()
                         webView.loadDataWithBaseURL(EmbedFrame.BASE_URL, EmbedFrame.html(url), "text/html", "utf-8", null)
                     } else {
@@ -171,4 +182,4 @@ private class WebViewHolder {
     val landing = PageLanding()
 }
 
-internal data class LoadRequest(val url: String, val reloadToken: Int, val mode: PlayerMode)
+internal data class LoadRequest(val url: String, val reloadToken: Int, val mode: PlayerMode, val sandboxed: Boolean)

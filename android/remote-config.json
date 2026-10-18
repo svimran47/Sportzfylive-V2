@@ -8,6 +8,8 @@
   "adBlocking": false,
   "extraBlockedHosts": [],
   "playerMode": "direct",
+  "embedSandbox": true,
+  "embedResolve": true,
   "minVersionCode": 0,
   "updateUrl": "",
   "maintenance": {

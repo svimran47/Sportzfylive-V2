@@ -106,7 +106,7 @@ class WatchViewModelTest {
     }
 
     @Test
-    fun `a missing match after a failed load offers retry instead of "gone"`() = runTest {
+    fun `a missing match after a failed load offers retry instead of gone`() = runTest {
         val offline = FakeMatchRepository(emptyList()).apply {
             emit(MatchFeed(emptyList(), updatedAtMillis = null, isLoading = false, error = DataError.NETWORK))
         }

@@ -158,9 +158,15 @@ fun TvPlayerLayer(
     val playerState = rememberStreamPlayerState()
     KeepScreenOnEffect(active = !playerState.isPaused)
 
-    // Channel pages load directly with no referer and no sandbox, like the
-    // match player: the page stays on its own host and its pop-ups are trapped.
-    val config = PlayerConfig.from(LocalAppConfig.current).copy(mode = PlayerMode.DIRECT)
+    // Channel pages load directly with no referer, like the match player: the
+    // page stays on its own host and its pop-ups are trapped. A channel the
+    // directory flagged, or the remote sandbox switch, runs in a sandboxed
+    // iframe instead.
+    val baseConfig = PlayerConfig.from(LocalAppConfig.current)
+    val config = baseConfig.copy(
+        mode = PlayerMode.DIRECT,
+        sandboxed = baseConfig.sandboxed || channel.sandboxed,
+    )
     var origin by remember { mutableStateOf(Offset.Zero) }
 
     BoxWithConstraints(

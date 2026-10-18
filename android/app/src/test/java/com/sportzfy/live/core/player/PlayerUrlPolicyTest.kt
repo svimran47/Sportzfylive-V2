@@ -85,17 +85,26 @@ class PlayerUrlPolicyTest {
     }
 
     @Test
-    fun `subframes always load so nested cross-domain players work`() {
+    fun `nested player iframes load from any host or scheme`() {
         for (url in listOf(
             "https://other-player.example/embed/1",
             "http://iptv.example:8080/embed/1",
-            "https://googleads.g.doubleclick.net/pagead",
-            "https://www.propellerads.com/x",
             "blob:https://player.example/1234",
             "about:srcdoc",
             "intent://scan/#Intent;scheme=market;end",
         )) {
             assertEquals(url, ALLOW, sub(url))
+        }
+    }
+
+    @Test
+    fun `an ad network's iframe is the ad itself, so it is refused`() {
+        for (url in listOf(
+            "https://googleads.g.doubleclick.net/pagead",
+            "https://www.propellerads.com/x",
+            "https://a.exosrv.com/frame",
+        )) {
+            assertEquals(url, BLOCK, sub(url))
         }
     }
 
@@ -106,15 +115,38 @@ class PlayerUrlPolicyTest {
         assertEquals(ALLOW, policy.resource("https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"))
         assertEquals(ALLOW, policy.resource("https://cdn.example/hls/master.m3u8"))
         assertEquals(ALLOW, policy.resource("data:image/png;base64,AAAA"))
+        // The ad's own frame, though, is the ad.
+        assertEquals(BLOCK, policy.resource("https://googleads.g.doubleclick.net/pagead/ads", destination = "iframe"))
+    }
+
+    @Test
+    fun `a script from a blocked host still loads, a frame or image does not`() {
+        val ads = PlayerUrlPolicy(blockedResourceHosts = setOf("ads.test"))
+        // Sec-Fetch-Dest decides when the WebView reports it.
+        assertEquals(ALLOW, ads.resource("https://ads.test/x", destination = "script"))
+        assertEquals(BLOCK, ads.resource("https://ads.test/x", destination = "iframe"))
+        assertEquals(BLOCK, ads.resource("https://ads.test/x", destination = "image"))
+        assertEquals(BLOCK, ads.resource("https://ads.test/beacon", destination = "empty"))
+        // No destination (an older WebView): the URL and Accept header decide.
+        assertEquals(ALLOW, ads.resource("https://ads.test/aclib.js"))
+        assertEquals(ALLOW, ads.resource("https://ads.test/x", accept = "application/javascript"))
+        assertEquals(BLOCK, ads.resource("https://ads.test/x", accept = "text/html"))
+        assertEquals(BLOCK, ads.resource("https://ads.test/x", accept = "image/webp"))
+        // Ambiguous requests are left alone rather than risk a black player.
+        assertEquals(ALLOW, ads.resource("https://ads.test/x"))
     }
 
     @Test
     fun `resource blocking covers only the hosts it is given`() {
         val narrow = PlayerUrlPolicy(blockedHosts = AdHosts.DEFAULT, blockedResourceHosts = setOf("bad.test"))
+        // A blocked host's script is still not a resource to refuse.
         assertEquals(ALLOW, narrow.resource("https://a.exosrv.com/ad-provider.js"))
-        assertEquals(BLOCK, narrow.resource("https://x.bad.test/a.js"))
+        assertEquals(ALLOW, narrow.resource("https://a.exosrv.com/ad.png", destination = "image"))
+        // Only the hosts given for resources are refused, and only when not a script.
+        assertEquals(BLOCK, narrow.resource("https://x.bad.test/a.png", destination = "image"))
+        assertEquals(ALLOW, narrow.resource("https://x.bad.test/a.js"))
         assertEquals(BLOCK, narrow.navigation("https://ads.popads.net/r", isMainFrame = true))
-        assertEquals(ALLOW, narrow.navigation("https://a.exosrv.com/frame", isMainFrame = false))
+        assertEquals(ALLOW, narrow.navigation("https://nested.example/frame", isMainFrame = false))
     }
 
     @Test
@@ -123,6 +155,7 @@ class PlayerUrlPolicyTest {
         assertEquals(ALLOW, custom.navigation("https://player.test/x", isMainFrame = true))
         assertEquals(BLOCK, custom.navigation("https://embed.st/x", isMainFrame = true))
         assertEquals(BLOCK, custom.navigation("https://bad.test/x", isMainFrame = true))
-        assertEquals(BLOCK, custom.resource("https://x.bad.test/a.js"))
+        assertEquals(BLOCK, custom.resource("https://x.bad.test/a.png", destination = "image"))
+        assertEquals(ALLOW, custom.resource("https://x.bad.test/a.js"))
     }
 }
