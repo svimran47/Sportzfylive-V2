@@ -352,11 +352,23 @@ assert.ok(
 );
 ok("watch view renders crests, share targets and a related-matches rail");
 
-const wantUrl1 = "https://embed.st/embed/admin/ppv-new-york-giants-at-los-angeles-rams/1";
-const wantUrl2 = "https://embed.st/embed/admin/ppv-new-york-giants-at-los-angeles-rams/2";
-assert.equal(chips[0].dataset.embedUrl, wantUrl1);
-assert.equal(chips[1].dataset.embedUrl, wantUrl2);
-ok("toggle embed URLs follow embed.st/embed/{source}/{id}/{streamNo}");
+// Streamed sources play through the Worker's embed resolver in the first-party
+// player page; the plain embed.st frame remains as the player page's own
+// fallback, encoded into the ?fallback= parameter.
+const embedPlain1 = "https://embed.st/embed/admin/ppv-new-york-giants-at-los-angeles-rams/1";
+const embedPlain2 = "https://embed.st/embed/admin/ppv-new-york-giants-at-los-angeles-rams/2";
+const cardUrl = (embedUrl) =>
+  "https://sportzfylive.svimranmy.workers.dev/player.html?src=" +
+  encodeURIComponent("/api/play/embed/admin/ppv-new-york-giants-at-los-angeles-rams/" + embedUrl.slice(-1)) +
+  "&fallback=" + encodeURIComponent(embedUrl);
+assert.equal(chips[0].dataset.embedUrl, cardUrl(embedPlain1));
+assert.equal(chips[1].dataset.embedUrl, cardUrl(embedPlain2));
+const decodeChip = (chip) => decodeURIComponent(decodeURIComponent(chip.dataset.embedUrl));
+assert.ok(chips[0].dataset.embedUrl.includes("player.html") &&
+    decodeChip(chips[0]).includes("/api/play/embed/admin/ppv-new-york-giants-at-los-angeles-rams/1") &&
+    decodeChip(chips[0]).includes("fallback=https://embed.st/embed/admin/ppv-new-york-giants-at-los-angeles-rams/1"),
+  "resolver path is the playback route, embed.st the fallback");
+ok("toggle embed URLs play via /api/play/embed with the embed.st frame as fallback");
 
 chips[0].click();
 const player2 = documentStub.getElementById("player-container");
@@ -364,19 +376,19 @@ assert.equal(player2.hidden, false, "clicking a chip should reveal the player");
 assert.equal(player2.children.length, 1, "player should contain exactly one iframe");
 const frame2 = player2.children[0];
 assert.equal(frame2.tagName, "iframe", "mounted element must be an iframe");
-assert.equal(frame2.src, wantUrl1, "iframe must point at the exact embed.st URL");
+assert.equal(frame2.src, cardUrl(embedPlain1), "iframe must point at the player page with the resolver path");
 assert.equal(frame2.allowFullscreen, true, "iframe must allow fullscreen");
 const barSourceAfter = documentStub.getElementById("player-bar-source");
 assert.ok(
   barSourceAfter.innerHTML.includes("Now playing") && barSourceAfter.innerHTML.includes("Stream 1"),
   "player control bar names the loaded stream"
 );
-ok("clicking a toggle persists .selected + aria-checked and mounts the embed.st iframe in the player");
+ok("clicking a toggle persists .selected + aria-checked and mounts the resolver player in the first-party frame");
 
 // Switching streams swaps the iframe without stacking players.
 chips[1].click();
 assert.equal(player2.children.length, 1, "only one iframe at a time");
-assert.equal(player2.children[0].src, wantUrl2, "second chip swaps the iframe src");
+assert.equal(player2.children[0].src, cardUrl(embedPlain2), "second chip swaps the iframe src");
 assert.ok(chips[1].classList.contains("selected"), "selection follows the click");
 assert.equal(chips[0].getAttribute("aria-checked"), "false", "previous toggle is deselected (single-selection radio group)");
 ok("switching toggles replaces the active stream and moves the single selection");

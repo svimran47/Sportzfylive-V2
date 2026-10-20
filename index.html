@@ -2244,7 +2244,20 @@
             const streams = Array.isArray(group && group.streams) ? group.streams : [];
             for (const stream of streams) {
                 if (stream && Number(stream.streamNo) > 0) {
-                    playable.push({ group: group, stream: stream });
+                    // Streamed sources play through the Worker's embed resolver
+                    // (/api/play/embed) in the first-party player page; when the
+                    // resolver cannot extract the media, the player page falls
+                    // back to the plain embed.st frame it came from.
+                    const resolvePath = "/api/play/embed/" +
+                        encodeURIComponent(String(group && group.source || "")) + "/" +
+                        encodeURIComponent(String(group && group.id || "")) + "/" +
+                        (Number(stream.streamNo) || 1);
+                    playable.push({
+                        group: group,
+                        stream: stream,
+                        url: PROXY_URL + "/player.html?src=" + encodeURIComponent(resolvePath) +
+                            "&fallback=" + encodeURIComponent(streamEmbedUrl(group, stream.streamNo))
+                    });
                 }
             }
         }

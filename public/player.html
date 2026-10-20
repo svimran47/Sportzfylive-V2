@@ -78,9 +78,18 @@ video{display:block;width:100%;height:100%;background:#000}
   var params = new URLSearchParams(location.search);
   var src = params.get("src") || "";
   // No type means HLS (the only kind the player used to handle); anything
-  // unrecognised gets the "try everything" path.
+  // unrecognised gets the "try everything" path. Embed-resolved sources go
+  // straight to "auto" too: what the Worker extracted behind an embed page
+  // may be a manifest or a plain file.
   var type = String(params.get("type") || "hls").trim().toLowerCase();
   if (TYPES.indexOf(type) === -1) type = "auto";
+  if (type === "hls" && /^\/api\/play\/embed\//.test(src)) type = "auto";
+
+  // When the frame came through the player page for an embed-resolved source,
+  // fall back to the plain embed frame if the extracted media never plays —
+  // resolution is best effort, and the embed page is still an answer.
+  var fallback = params.get("fallback") || "";
+  var fallbackTried = false;
 
   var libs = {};            // library name -> { done, value, waiting }
   var active = null;        // current engine: { destroy, recover?, onVideoError?, onStable? }
@@ -99,6 +108,21 @@ video{display:block;width:100%;height:100%;background:#000}
   }
   function fail(text) {
     if (failed || stopped) return;
+    // One fallback hop, early in the session (nothing has started yet): an
+    // embed-resolved source that could not be resolved or fails to open hands
+    // the frame to the embed.st page it came from. Targets are restricted to
+    // same-origin and embed.st, so this cannot be pointed anywhere else.
+    if (fallback && !fallbackTried && !started) {
+      var hopUrl = null;
+      try { hopUrl = new URL(fallback, location.origin); } catch (e) {}
+      var allowed = Boolean(hopUrl) && (hopUrl.origin === location.origin ||
+        hopUrl.hostname === "embed.st" || hopUrl.hostname.endsWith(".embed.st"));
+      if (allowed) {
+        fallbackTried = true;
+        location.replace(hopUrl.href);
+        return;
+      }
+    }
     failed = true;
     teardown();
     busy(false);
@@ -549,7 +573,7 @@ video{display:block;width:100%;height:100%;background:#000}
     begin();
   });
 
-  if (!/^\/api\/play\/(tv\/[^/?#]+|stream\/[^/?#]+\/[^/?#]+)$/.test(src)) {
+  if (!/^\/api\/play\/(tv\/[^/?#]+|stream\/[^/?#]+\/[^/?#]+|embed\/[^/?#]+\/[^/?#]+\/\d+)$/.test(src)) {
     fail(TEXT.unavailable);
     return;
   }

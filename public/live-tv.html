@@ -290,10 +290,11 @@
     ? location.origin
     : "https://sportzfylive.svimranmy.workers.dev";
 
-  // Embed channels flagged "sandbox" in the catalog run sandboxed: no
-  // pop-ups and no top-level navigation. Scripts and same-origin stay on so
-  // the player works; channels live on other origins, so they cannot lift the
-  // sandbox. Other channels load directly — some render a black frame in one.
+  // Embed channels run sandboxed: no pop-ups and no top-level navigation —
+  // the Worker flips the catalog default ("sandbox" is opt-out with explicit
+  // "sandbox": false). Scripts and same-origin stay on so the player works;
+  // channels live on other origins, so they cannot lift the sandbox. A channel
+  // that renders a black frame inside one is unticked from the admin panel.
   const SANDBOX = "allow-scripts allow-same-origin allow-forms allow-modals allow-presentation";
 
   const $ = (id) => document.getElementById(id);

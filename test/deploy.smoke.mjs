@@ -112,7 +112,7 @@ assert.ok(liveTv.includes('if (channel.sandbox) frame.setAttribute("sandbox", SA
 assert.ok(!/allow-popups|allow-top-navigation/.test(liveTv), "channel frames cannot open pop-ups or navigate the page");
 assert.ok((html.match(/href="\/live-tv"/g) || []).length >= 5, "the homepage links to Live TV from its menus");
 const player = read("player.html").toString("utf8");
-assert.ok(player.includes("/^\\/api\\/play\\/(tv\\/[^/?#]+|stream\\/[^/?#]+\\/[^/?#]+)$/"), "the player only accepts /api/play paths");
+assert.ok(player.includes("/^\\/api\\/play\\/(tv\\/[^/?#]+|stream\\/[^/?#]+\\/[^/?#]+|embed\\/[^/?#]+\\/[^/?#]+\\/\\d+)$/"), "the player only accepts /api/play paths");
 ok("Live TV page and player published and linked");
 
 // The player's engines come from pinned CDN copies only: no other hosts, no

@@ -18,7 +18,8 @@ const LEGACY_URL = "https://raw.githubusercontent.com/svimran46/playlist.m3u/mai
 // Strings that must never reach a viewer: upstream hosts and the login.
 const SECRETS = [
   "iptv.example", "user/pass", "203.0.113.10", "dash.example", "secure.example",
-  "pipe.example", "keys.example", "other.example", "edge.example"
+  "pipe.example", "keys.example", "other.example", "edge.example",
+  "player.example", "real.example", "trap.example"
 ];
 
 // ---------------------------------------------------------------------------
@@ -878,5 +879,105 @@ ok("without STREAM_PROXY_SECRET or ADMIN_TOKEN the sealing key comes from a KV-k
   assert.equal((await unknown.json()).error, "Unknown endpoint");
 }
 ok("play routes match exactly; anything else is a 404");
+
+console.log("# embed resolver");
+
+{
+  // The /api/play/embed route digs the real media out of the embed.st player
+  // chain server-side: embed page -> nested player page -> manifest, then
+  // plays it through the sealed-token proxy like every other stream.
+  const env = makeEnv();
+  upstream["https://embed.st/embed/lteam/id-42/1"] = () =>
+    respond(
+      '<html><body><iframe src="//player.example/frame.html"></iframe></body></html>',
+      { headers: { "Content-Type": "text/html; charset=utf-8" } }
+    );
+  upstream["https://player.example/frame.html"] = () =>
+    respond(
+      '<html><script>source="https://edge.example/live/master.m3u8?token=Z";</script></html>',
+      { headers: { "Content-Type": "text/html; charset=utf-8" } }
+    );
+  upstream["https://edge.example/live/master.m3u8?token=Z"] = () =>
+    respond("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nhttps://edge.example/live/720p.m3u8\n",
+      { headers: { "Content-Type": "application/vnd.apple.mpegurl" } });
+  upstream["https://edge.example/live/720p.m3u8"] = () =>
+    respond("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-KEY:METHOD=AES-128,URI=\"https://edge.example/live/key.enc\"\n#EXTINF:6,\nseg-1.ts\n",
+      { headers: { "Content-Type": "application/vnd.apple.mpegurl" } });
+
+  const scope = "/api/play/embed/lteam/id-42/1";
+  const res = await call(env, scope);
+  assert.equal(res.status, 200, "the resolved media plays through the proxy");
+  assert.equal(res.headers.get("Content-Type"), "application/vnd.apple.mpegurl");
+  const text = await res.text();
+  assertPrivate("embed-resolved playlist", text);
+  const uris = playlistUris(text);
+  assert.equal(uris.length, 1, "master playlist has one variant");
+  assert.ok(uris[0].startsWith(scope + "/s/"), "sealed variant tokens live under the embed route");
+
+  // The /s/<token> playlist round-trips; key and segment are re-sealed.
+  const variant = await call(env, uris[0]);
+  assert.equal(variant.status, 200, "sealed variant opens under its own scope");
+  const media = await variant.text();
+  assertPrivate("embed media playlist", media);
+  const parts = playlistUris(media);
+  assert.equal(parts.length, 1, "media playlist: segments only as URI lines");
+  assert.ok(parts[0].startsWith(scope + "/s/"), "segment re-sealed to the same scope");
+  assert.ok(media.includes('#EXT-X-KEY:METHOD=AES-128,URI="' + scope + "/s/"), "the EXT-X-KEY is sealed too");
+  upstream["https://edge.example/live/key.enc"] = () =>
+    respond(new Uint8Array(32), { headers: { "Content-Type": "application/octet-stream" } });
+  upstream["https://edge.example/live/seg-1.ts"] = () =>
+    respond(new Uint8Array(188).fill(0x47), { headers: { "Content-Type": "video/mp2t" } });
+  for (const part of parts) {
+    const response = await call(env, part);
+    assert.equal(response.status, 200, "sealed subresource opens");
+    await response.arrayBuffer();
+  }
+
+  // A second playback request is served from the resolve cache and never
+  // walks the embed pages again.
+  const embedFetches = upstreamLog.filter(c => c.url === "https://embed.st/embed/lteam/id-42/1").length;
+  const again = await call(env, scope);
+  assert.equal(again.status, 200);
+  await again.text();
+  assert.equal(upstreamLog.filter(c => c.url === "https://embed.st/embed/lteam/id-42/1").length, embedFetches, "resolve result is cached");
+
+  // Tokens stay scoped: a garbage token is refused without an upstream fetch.
+  assert.equal((await call(env, scope + "/s/not-a-real-token")).status, 404);
+}
+ok("embed resolver: media extracted behind embed.st plays through the first-party proxy");
+
+{
+  // Nothing findable: the route answers the sandboxed "unavailable" notice,
+  // nothing is cached, and the player page falls back to the embed frame.
+  const env = makeEnv();
+  upstream["https://embed.st/embed/lteam/dead/2"] = () =>
+    respond("<html><body>offline</body></html>", { headers: { "Content-Type": "text/html; charset=utf-8" } });
+  const res = await call(env, "/api/play/embed/lteam/dead/2");
+  assert.equal(res.status, 404);
+  assert.equal(res.headers.get("Content-Security-Policy"), "sandbox");
+  assert.equal(await res.text(), "This stream is not available.");
+  assert.ok(![...env.SPORTZFY_DB.store.keys()].some(k => k.startsWith("embed_resolve:")), "misses write no cache record");
+}
+ok("embed resolver: unresolved lookups fall back cleanly (404, no cache)");
+
+{
+  // An HTML answer never impersonates media: the .m3u8 that serves a web page
+  // fails the probe and the real playlist (checked after it) wins.
+  const env = makeEnv();
+  upstream["https://embed.st/embed/g2real/a/3"] = () =>
+    respond('<html>file="https://trap.example/wrap.m3u8" src="https://real.example/live/master.m3u8"</html>',
+      { headers: { "Content-Type": "text/html; charset=utf-8" } });
+  upstream["https://trap.example/wrap.m3u8"] = () =>
+    respond("<html>you are being probed</html>", { headers: { "Content-Type": "text/html; charset=utf-8" } });
+  upstream["https://real.example/live/master.m3u8"] = () =>
+    respond("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nseg.ts\n",
+      { headers: { "Content-Type": "application/vnd.apple.mpegurl" } });
+  const res = await call(env, "/api/play/embed/g2real/a/3");
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  assertPrivate("resolver playlist", text);
+  assert.ok(text.startsWith("#EXTM3U"), "the real playlist is served, not the HTML decoy");
+}
+ok("embed resolver: HTML answers fail the probe and the real playlist is used");
 
 console.log("\nAll " + passed + " stream proxy assertions passed.");

@@ -19,6 +19,7 @@ const SYNC_LOG_LIMIT = 30;                       // sync runs kept for the admin
 const SETTINGS_KEY = "site_settings";            // every admin-editable setting, one record
 const TV_CHANNELS_KEY = "tv_channels";           // Live TV catalog (channels + playlist sync state)
 const PLAY_INDEX_KEY = "play_index";             // matchId -> streamId -> playback URL, for /api/play redirects
+const EMBED_RESOLVE_KEY_PREFIX = "embed_resolve:"; // source/id/streamNo lookup -> resolved media URL, for /api/play/embed
 const ADMIN_CREDENTIAL_KEY = "admin_credential"; // salted hash of a password set from the admin panel
 
 // The Live TV catalog is public/sports.m3u from this repo (Xtream Codes live
@@ -2437,7 +2438,9 @@ function publicChannel(channel) {
     category: TV_CATEGORIES.includes(channel.category) ? channel.category : channelCategory(channel.group, channel.name),
     group: String(channel.group ?? ""),
     kind: streamKind(channel.url),
-    sandbox: Boolean(channel.sandbox)
+    // Embedded channels run sandboxed by default: the catalog opts a channel
+    // out with an explicit "sandbox": false.
+    sandbox: channel.sandbox !== false
   };
 }
 
@@ -2954,9 +2957,28 @@ function safeDecode(value) {
 // followed by /s/<token> or /b/<token>/<path>.
 const TV_PLAY_ROUTE = /^\/api\/play\/tv\/([^/]+)(?:\/(s|b)\/([A-Za-z0-9_-]+)(\/.*)?)?$/;
 const STREAM_PLAY_ROUTE = /^\/api\/play\/stream\/([^/]+)\/([^/]+)(?:\/(s|b)\/([A-Za-z0-9_-]+)(\/.*)?)?$/;
+const EMBED_PLAY_ROUTE = /^\/api\/play\/embed\/([^/]+)\/([^/]+)\/(\d+)(?:\/(s|b)\/([A-Za-z0-9_-]+)(\/.*)?)?$/;
 
 function parsePlayRoute(pathname) {
-  let match = pathname.match(TV_PLAY_ROUTE);
+  let match = pathname.match(EMBED_PLAY_ROUTE);
+  if (match) {
+    const source = safeDecode(match[1]);
+    const id = safeDecode(match[2]);
+    const streamNo = Number(match[3]);
+    if (source === null || id === null || !streamNo) return { invalid: true };
+    return {
+      type: "embed",
+      source,
+      id,
+      streamNo,
+      scope: "embed/" + source + "/" + id + "/" + streamNo,
+      scopePath: "/api/play/embed/" + encodeURIComponent(source) + "/" + encodeURIComponent(id) + "/" + streamNo,
+      via: match[4] || "play",
+      token: match[5],
+      rest: match[6]
+    };
+  }
+  match = pathname.match(TV_PLAY_ROUTE);
   if (match) {
     const id = safeDecode(match[1]);
     if (id === null) return { invalid: true };
@@ -3014,6 +3036,8 @@ async function servePlayRoute(request, env, url, route) {
     return proxyStream(request, env, { ...route, target, headers: opened.headers, kind: streamKind(target) });
   }
 
+  if (route.type === "embed") return serveEmbedRoute(request, env, url, route);
+
   let source = null;
   if (route.type === "tv") {
     const state = await readTvStateCached(env);
@@ -3044,6 +3068,234 @@ async function servePlayRoute(request, env, url, route) {
     ...route,
     target: upstreamUrl,
     headers: cleanStreamHeaders(source.headers),
+    kind: streamKind(upstreamUrl)
+  });
+}
+
+/*
+ * Streamed embed resolver
+ *
+ * Streamed sources otherwise play inside the embed.st iframe — a page funded
+ * by pop-unders that also refuses to render whenever a frame is sandboxed
+ * ("please remove Sandbox from iframe tab or add allow-popups"). The Worker
+ * can do what a browser cannot: fetch that page without any window semantics,
+ * dig the underlying media URL (and the nested player pages it references)
+ * out of it, and re-serve the media through the sealed-token stream proxy
+ * above. The watch view then plays through the first-party player page: no
+ * embed frames, no pop-ups, no probe games. Resolved URLs are cached in KV
+ * for a few minutes and always stay behind /s/ tokens.
+ *
+ * Resolving is best effort; every miss falls back to the plain embed frame
+ * the client requested (the player page redirects there), so a change in the
+ * embed layout degrades to today's behavior, never to a dead stream.
+ */
+
+const EMBED_BASE = "https://embed.st/embed/";
+const EMBED_RESOLVE_FRESH_MS = 8 * 60 * 1000;    // a resolved URL is reused this long
+const EMBED_RESOLVE_TTL_S = 12 * 60 * 60;        // KV record lifetime (longer so failures alternate)
+const EMBED_DOCUMENT_CAP = 512 * 1024;           // max bytes read per page
+const EMBED_PAGE_BUDGET = 5;                     // max pages walked per resolve
+const EMBED_PROBE_BUDGET = 12;                   // max candidate verifications per resolve
+const EMBED_FETCH_TIMEOUT_MS = 8000;
+const EMBED_RESOLVE_TIMEOUT_MS = 13000;          // whole-flight budget for one resolve
+
+const ABS_MEDIA_URL = /(?:https?:)?\/\/[^\s"'`<>]{8,2000}\.(?:m3u8|m3u|mp4|mpd|ts)(?:\?[^"'`<>]{0,1000})?/gi;
+const REL_MEDIA_URL = /[^"'`\s<>]{4,1200}\.(?:m3u8|mpd|ts)(?:\?[^"'`\s<>]{0,1000})?/gi;
+const FRAME_URL_PATTERN = /<iframe\b[^>]*?src\s*=\s*["']([^"']{8,2000})["']/gi;
+
+// Resolves one lookup: { url, headers } or null. Never throws.
+async function resolveEmbedMedia(embedUrl) {
+  const visited = new Set();
+  const tried = new Set();
+  const queue = [embedUrl];
+  let pages = 0;
+  let probes = 0;
+  const startedAt = Date.now();
+
+  while (queue.length && pages < EMBED_PAGE_BUDGET && Date.now() - startedAt < EMBED_RESOLVE_TIMEOUT_MS) {
+    const pageUrl = queue.shift();
+    if (visited.has(pageUrl)) continue;
+    visited.add(pageUrl);
+    pages += 1;
+
+    const page = await fetchEmbedPage(pageUrl);
+    if (!page) continue;
+
+    // 1) direct media candidates, most explicit URLs first
+    const candidates = collectMediaCandidates(page.text, page.finalUrl, tried);
+    for (const candidate of candidates) {
+      if (probes >= EMBED_PROBE_BUDGET || Date.now() - startedAt >= EMBED_RESOLVE_TIMEOUT_MS) break;
+      tried.add(candidate);
+      probes += 1;
+      if (await mediaPlayable(candidate, page.finalUrl, page.type)) {
+        return { url: candidate, headers: { referer: page.finalUrl, userAgent: CHROME_UA } };
+      }
+    }
+
+    // 2) nested player pages (the embeds frame the real player elsewhere)
+    for (const frame of collectFrameCandidates(page.text, page.finalUrl)) {
+      if (!visited.has(frame)) queue.push(frame);
+    }
+  }
+  return null;
+}
+
+// GETs a document (HTML, JSON, whatever a player page uses) with a hard cap
+// and a hard timeout. null unless something text-ish came back.
+async function fetchEmbedPage(url) {
+  try {
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: "GET",
+        redirect: "follow",
+        headers: { "User-Agent": CHROME_UA, "Accept": "text/html,application/xhtml+xml,application/json,*/*;q=0.8" }
+      },
+      EMBED_FETCH_TIMEOUT_MS
+    );
+    const type = String(response.headers.get("Content-Type") || "").toLowerCase();
+    if (response.status >= 400 || (!type.includes("html") && !type.includes("json") && !type.startsWith("text/") && type && !type.includes("octet-stream") && !type.includes("javascript"))) {
+      discardBody(response);
+      return null;
+    }
+    const bytes = await readCapped(response.body, EMBED_DOCUMENT_CAP);
+    if (!bytes) {
+      discardBody(response);
+      return null;
+    }
+    return { text: new TextDecoder().decode(bytes), finalUrl: safeStreamUrl(response.url) || url, type };
+  } catch (_) {
+    return null;
+  }
+}
+
+function uniqueUrls(values, baseUrl) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (!text || /^(data|blob|javascript|about):/i.test(text)) continue;
+    let absolute;
+    try {
+      absolute = new URL(text, baseUrl);
+    } catch (_) {
+      continue;
+    }
+    if (absolute.protocol !== "https:" && absolute.protocol !== "http:") continue;
+    if (absolute.href.length > 2000) continue;
+    if (seen.has(absolute.href)) continue;
+    seen.add(absolute.href);
+    out.push(absolute.href);
+  }
+  return out;
+}
+
+// Playlist / file candidates found in a page, absolute first, in text order.
+// Encoded documents are scanned twice (raw + entity-decoded) because players
+// keep their config URLs URL-encoded inside HTML.
+function collectMediaCandidates(text, baseUrl, tried) {
+  const raw = [];
+  for (const sample of [text, decodeEntities(text)]) {
+    for (const match of sample.matchAll(ABS_MEDIA_URL)) raw.push(match[0]);
+    for (const match of sample.matchAll(REL_MEDIA_URL)) raw.push(match[0]);
+  }
+  return uniqueUrls(raw, baseUrl).filter(url => !tried.has(url));
+}
+
+// Nested player page candidates: plain iframes.
+function collectFrameCandidates(text, baseUrl) {
+  const raw = [];
+  for (const sample of [text, decodeEntities(text)]) {
+    for (const match of sample.matchAll(FRAME_URL_PATTERN)) raw.push(match[1]);
+  }
+  return uniqueUrls(raw, baseUrl).filter(url => isHttpPage(url)).slice(0, 3);
+}
+
+// Frames from unrelated hosts (fonts, images, trackers) litter embed pages;
+// only likely player pages go into the walk.
+function isHttpPage(url) {
+  try {
+    const pathname = new URL(url, EMBED_BASE).pathname.toLowerCase();
+    return !(/\.(css|js|mjs|png|jpe?g|gif|svg|woff2?|ttf|ico|mp3|webp|avif)(\?|$)/.test(pathname));
+  } catch (_) {
+    return false;
+  }
+}
+
+// Verifies a candidate really streams: an HLS/DASH playlist by prefix, raw
+// media by container bytes (TS sync bytes, MP4 box, DASH XML). An HTML page
+// fails, whatever the content type claims.
+async function mediaPlayable(candidate, referer, pageType) {
+  try {
+    const head = await fetchStreamHead(candidate, { Referer: referer, "User-Agent": CHROME_UA }, 2048);
+    if ((head.type || "").includes("text/html")) return false;
+    const bytes = head.bytes;
+    if (bytes.length >= 3 && hasTsSync(bytes)) return true;
+    const text = new TextDecoder().decode(bytes.subarray(0, Math.min(bytes.length, 512)));
+    if (text.includes("#EXTM3U")) return true;
+    if (/^\uFEFF?[\s]*(<\?xml|<MPD)/i.test(text)) return true;
+    if (text.startsWith("FLV")) return true;
+    if ((/\.(m4s|mp4|mp4v|m4a|cmfv|cmfa)(\?|$)/i.test(candidate) || /^ftyp/.test(new TextDecoder().decode(bytes.subarray(0, 12))) )) return true;
+    // Anything the embed page API produced (JSON with a video/* content type)
+    // is left for the proxy's own sniffing to judge.
+    return (head.type || "").includes("video/") || (head.type || "").includes("mpegurl");
+  } catch (_) {
+    return false;
+  }
+}
+
+async function readEmbedCache(env, route) {
+  const db = env.SPORTZFY_DB;
+  if (!db || typeof db.get !== "function") return null;
+  try {
+    const record = await db.get(EMBED_RESOLVE_KEY_PREFIX + route.scope, "json");
+    return record && typeof record === "object" && typeof record.u === "string" ? record : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function writeEmbedCache(env, route, record) {
+  const db = env.SPORTZFY_DB;
+  if (!db || typeof db.put !== "function") return;
+  try {
+    await db.put(EMBED_RESOLVE_KEY_PREFIX + route.scope, JSON.stringify(record), { expirationTtl: EMBED_RESOLVE_TTL_S });
+  } catch (_) {}
+}
+
+// /api/play/embed/:source/:id/:streamNo — the media behind embed.st's player
+// page, served with the same proxy contract as every other playback route.
+async function serveEmbedRoute(request, env, url, route) {
+  let record = await readEmbedCache(env, route);
+  if (!record || !(Date.now() - (Number(record.found) || 0) < EMBED_RESOLVE_FRESH_MS)) {
+    // Stale (or missing): re-resolve. A stale record is kept as the answer
+    // when nothing new is found, so an embed-storm does not strand playback.
+    const embedUrl = EMBED_BASE + encodeURIComponent(route.source) + "/" + encodeURIComponent(route.id) + "/" + route.streamNo;
+    const resolved = await resolveEmbedMedia(embedUrl).catch(() => null);
+    if (resolved) {
+      record = { u: resolved.url, h: cleanStreamHeaders(resolved.headers), found: Date.now() };
+      await writeEmbedCache(env, route, record);
+    }
+  }
+
+  const target = record ? safeStreamUrl(record.u) : "";
+  if (!target) return playUnavailable();
+
+  const pseudoSource = { url: target, headers: cleanStreamHeaders(record.h || {}) };
+  if (!needsProxy(pseudoSource)) return redirectTo(target);
+
+  // ?format=hls (iPhones without MSE) mirrors the plain-stream route.
+  let upstreamUrl = target;
+  if (url.searchParams.get("format") === "hls") {
+    const parsed = new URL(target);
+    if (/\.ts$/i.test(parsed.pathname)) parsed.pathname = parsed.pathname.replace(/\.ts$/i, ".m3u8");
+    else if (/\/live\/[^/]+\/[^/]+\/\d+$/.test(parsed.pathname)) parsed.pathname += ".m3u8";
+    upstreamUrl = parsed.href;
+  }
+  return proxyStream(request, env, {
+    ...route,
+    target: upstreamUrl,
+    headers: cleanStreamHeaders(pseudoSource.headers),
     kind: streamKind(upstreamUrl)
   });
 }
