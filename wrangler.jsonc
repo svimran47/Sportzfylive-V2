@@ -26,5 +26,13 @@
     "producers": [{ "binding": "SPORTZFY_SYNC_QUEUE", "queue": "sportzfylive-sync" }],
     "consumers": [{ "queue": "sportzfylive-sync", "max_batch_size": 1, "max_batch_timeout": 5, "max_concurrency": 1, "max_retries": 3 }]
   },
-  "kv_namespaces": [{ "binding": "SPORTZFY_DB", "id": "bd1be243a4494a369d16617100f09561" }]
+  "kv_namespaces": [{ "binding": "SPORTZFY_DB", "id": "bd1be243a4494a369d16617100f09561" }],
+  // Worker Previews (wrangler 4.133+): `npx wrangler preview` requires a
+  // previews block even when it is empty. Empty means a preview publishes
+  // without the KV/queue bindings — enough for static pages and code checks;
+  // point copies at staging resources there, never the production ids.
+  "previews": {},
+  // Issue workers.dev URLs for preview deployments (routing only; applies on
+  // the next production deploy).
+  "preview_urls": true
 }
