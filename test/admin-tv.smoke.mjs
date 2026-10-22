@@ -114,7 +114,7 @@ const admin = (path, method = "GET", body) =>
 // (any supported format works there), and an M3U playlist.
 // ---------------------------------------------------------------------------
 
-const PLAYLIST_URL = "https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u";
+const PLAYLIST_URL = "https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json";
 const channelsJs = (list) => "const channels = " + JSON.stringify(list, null, 2) + ";\n";
 const UPSTREAM = [
   { name: "ESPN", logo: "https://img.example/espn.png?a=1&amp;amp;b=2", genre: "Sports", url: "https://tv.example/espn", sandbox: true },
@@ -128,13 +128,13 @@ const UPSTREAM = [
 
 console.log("# Live TV catalog");
 
-// First public read seeds the catalog from the default playlist. Nothing is
-// listed until the strict probe has verified it.
+// First public read seeds the catalog from the default playlist. Stream checks
+// are advice, so the whole active catalog is served rather than an empty one.
 routes[PLAYLIST_URL] = reply(200, channelsJs(UPSTREAM));
 {
   const res = await call("/api/tv/channels");
   assert.equal(res.status, 200);
-  assert.deepEqual((await res.json()).channels, [], "unprobed channels are not listed");
+  assert.ok((await res.json()).channels.length > 0, "an unprobed catalog is served, not emptied");
   // Stand in for the cron probe: every synced channel verified on its current URL.
   const seeded = JSON.parse(kv.store.get("tv_channels")).channels;
   kv.store.set("tv_health", JSON.stringify({ channels: Object.fromEntries(seeded.map(c => [c.id, { url: c.url, working: true }])) }));
@@ -352,9 +352,9 @@ console.log("# settings");
   const badCategory = await admin("/api/admin/settings/tvSource", "PUT", { defaultCategory: "Quidditch" });
   assert.equal(badCategory.status, 400);
   const legacy = await (await admin("/api/admin/settings/tvSource", "PUT", {
-    url: "https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json", defaultCategory: "entertainment"
+    url: "https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u", defaultCategory: "entertainment"
   })).json();
-  assert.equal(legacy.settings.tvSource.url, PLAYLIST_URL, "the retired channels.json source maps to the default");
+  assert.equal(legacy.settings.tvSource.url, PLAYLIST_URL, "the retired sports.m3u source maps to the default");
   assert.equal(legacy.settings.tvSource.defaultCategory, "Entertainment");
   assert.equal(legacy.tvSync, undefined, "same source: no resync");
   await admin("/api/admin/settings/tvSource", "PUT", { defaultCategory: "Sports" });

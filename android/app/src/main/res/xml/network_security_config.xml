@@ -3,8 +3,8 @@
   Plain-http streams: many IPTV feeds (HLS, MPEG-TS) and some channel pages are
   served without TLS, so cleartext is allowed app-wide. The app's own calls
   (APIs, remote config) still use https only. Channel logos may be http: the
-  IPTV picon servers behind sports.m3u have no TLS. Whether an http stream
-  may play is decided by PlayerConfig.allowHttpStreams.
+  picon servers the IPTV playlists use often have no TLS. Whether an http
+  stream may play is decided by PlayerConfig.allowHttpStreams.
 -->
 <network-security-config xmlns:tools="http://schemas.android.com/tools">
     <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration">

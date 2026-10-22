@@ -14,7 +14,7 @@ A modern, responsive web application for streaming live sports matches and 24/7 
 - ⚠️ **Error Handling**: Per-source failure isolation — one bad Streamed source never breaks a match list
 - 🎯 **Watch page**: match identity (crests + share) on top, the player, stream chips labelled with language/provider/HD, then a rail of other matches — all rendered from the match list already in memory, so opening a match costs no extra requests
 - 🔗 **Shareable matches**: share buttons emit `#match=<id>` links, and the site opens that match directly on load
-- 📺 **Live TV** (`/live-tv`): the sports channels from [`sports.m3u`](https://github.com/svimran46/channels.m3u/tree/claude/youthful-knuth-czn4sp) (built by `build_sports_m3u.py`) — country filter, sport chips, search, a universal player (HLS, MPEG-TS, DASH, FLV, MP4/WebM, audio, embeds) with previous/next, reload, full screen and share, `#ch=<id>` deep links, and an "Up next" rail on wide screens
+- 📺 **Live TV** (`/live-tv`): the channels from the [`channels.json`](https://github.com/svimran46/playlist.m3u) list on `main` — country filter, sport chips, search, a universal player (HLS, MPEG-TS, DASH, FLV, MP4/WebM, audio, embeds) with previous/next, reload, full screen and share, `#ch=<id>` deep links, and an "Up next" rail on wide screens
 - 🛠️ **Admin panel** (`/admin`): dashboard, match management (filters, bulk actions, featured/active flags, streams picked from the TV catalog), Live TV channel management (playlist sync, import from URL with stream health checks), fetch logs and site settings — no redeploy needed for any of it
 - 📱 **Responsive Design**: Fully responsive grid layout for mobile, tablet, and desktop
 - 🎨 **Modern UI**: Dark theme with smooth animations and transitions
@@ -26,12 +26,16 @@ The Worker probes every active Live TV channel on the 10-minute cron, 100 per ru
 - **HLS:** the playlist must list a segment, and that segment must be MPEG-TS (sync bytes) or fMP4 with at least 16 KB of data. Master playlists are followed one level.
 - **MPEG-TS / FLV / progressive:** at least 16 KB of data with valid container bytes; an HTML page fails.
 - **DASH:** the manifest must be a valid MPD. Segments are not fetched, so DASH is verified less strictly than HLS.
-- **Web-page embeds:** never listed, because they can't be verified without a browser.
+- **Web-page embeds:** never *verified* — they can't be probed without a browser.
 - Probes time out after 10 seconds, and that limit covers the body read too.
 
-Hysteresis: a channel is listed after 2 good probes in a row and dropped after 3 bad ones in a row. A changed stream URL starts over. Results are one KV record (`tv_health`), written once per run, and `GET /api/admin/tv/health` returns them. The public channel list, the site's Live TV page and `/api/tv/playlist.m3u` (which the app reads) show only listed channels.
+Results are one KV record (`tv_health`), written once per run, and `GET /api/admin/tv/health` returns them. A channel is called *working* after 2 good probes in a row and *failed* after 3 bad ones in a row; a changed stream URL starts over, and a channel that has not been probed yet is *unchecked*.
 
-Probes run from Cloudflare's network, not the viewer's, so a channel that is blocked only for some countries can be listed here and still fail for a viewer there. A channel that needs custom request headers is probed with them, but left out of the app playlist because the app can't send them.
+**Checks are advice, never a gate.** The public channel list, the site's Live TV page and `/api/tv/playlist.m3u` (which the app reads) serve **every active channel** — checked or not, working or failed — and only `active: false` (or a missing stream URL, or one that needs custom request headers the app can't send) leaves a channel out. The probes fill the admin's per-channel check column so the owner can see which streams are dead; they cannot hide a channel from viewers.
+
+That is deliberate, because a probe is not evidence about a viewer: probes run from Cloudflare's network, not the viewer's device. A panel that refuses Cloudflare's egress entirely (a line allowing a single connection, a provider that answers only residential IPs, or a transient 4xx/5xx window) makes every probe fail while the streams play perfectly on a phone. Gating the directory on that verdict emptied Live TV for every viewer at once, and it could not recover quickly either — 100 probes per run, oldest first, two passes before a channel lists — so the check reports and nothing more.
+
+A channel that needs custom request headers is probed with them, but left out of the app playlist because the app can't send them.
 
 ## Architecture
 
@@ -139,8 +143,8 @@ Cleanup). A match the feed reports live is never removed.
 
 `/live-tv` lists the active channels from the Worker's catalog. The catalog is
 synced from the TV source playlist — by default the latest commit of
-`sports.m3u` on the `claude/youthful-knuth-czn4sp` branch of
-`svimran46/channels.m3u` (2,230 sports channels in 89 country groups). It is
+`channels.json` on `main` of `svimran46/playlist.m3u` (a JavaScript snippet
+wrapping a JSON list of named channels). It is
 seeded on first use, re-synced every hour by the cron when *Re-sync
 automatically* is on (and at once when the source URL changes), and on demand
 from the admin. A sync replaces every synced channel, so only the playlist's

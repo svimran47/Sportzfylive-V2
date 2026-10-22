@@ -1,5 +1,6 @@
-// Smoke test for the strict Live TV probe in worker.js: a channel is listed
-// only after real media was read on consecutive probes. Serves fake streams
+// Smoke test for the Live TV probe in worker.js: the probe reads real media and
+// records what it found. Its verdicts are advice for the admin — they never
+// gate the public list, which serves every active channel. Serves fake streams
 // through a mocked fetch and drives the real playlist route.
 
 import assert from "node:assert/strict";
@@ -9,7 +10,7 @@ const realSetTimeout = globalThis.setTimeout;
 globalThis.setTimeout = (fn, ms, ...rest) => realSetTimeout(fn, Math.min(ms ?? 0, 150), ...rest);
 
 const worker = (await import("../worker.js")).default;
-const { probeChannel, listedChannels, runTvProbe, channelCheck, checkSummary } = await import("../worker.js");
+const { probeChannel, workingChannels, activeChannels, runTvProbe, channelCheck, checkSummary } = await import("../worker.js");
 
 // A transport-stream packet run: 0x47 at the start of every 188-byte packet.
 function tsBytes(packets = 200) {
@@ -79,14 +80,15 @@ assert.equal(verdict.ok, false, "a stalled stream times out");
 assert.equal(verdict.reason, "timeout");
 
 verdict = await probeChannel({ url: "https://embed.example/player/abc" });
-assert.equal(verdict.ok, false, "web-page embeds are never listed");
+assert.equal(verdict.ok, false, "web-page embeds are never verified");
 assert.match(verdict.reason, /can't be verified/);
 
 // Stored stream headers reach the upstream under their HTTP names.
 assert.equal((await probeChannel({ url: "https://ua.example/live.ts", headers: { userAgent: "VLC/3.0" } })).ok, true, "stored User-Agent is sent");
 assert.equal((await probeChannel({ url: "https://ua.example/live.ts" })).ok, false, "without it the stream refuses");
 
-// 2. Listing needs two good probes in a row; a dead channel never lists.
+// 2. Two good probes in a row call a channel working; a dead one never does.
+// What that verdict then does — and doesn't do — to the public list is 4b.
 const env = kvStore({
   tv_channels: { channels: [
     channel("good", "https://ok.example/live.m3u8"),
@@ -103,14 +105,14 @@ assert.equal(health.channels.off, undefined, "inactive channels are not probed")
 
 await runTvProbe(env);
 health = JSON.parse(env.raw.get("tv_health"));
-assert.equal(health.channels.good.working, true, "two good probes list the channel");
+assert.equal(health.channels.good.working, true, "two good probes call the channel working");
 assert.equal(health.channels.dead.working, false);
 
-// 3. A listed channel survives one bad probe, then drops after three.
+// 3. A working channel survives one bad probe, then is called failed after three.
 globalThis.fetch = async () => new Response("gone", { status: 404 });
 await runTvProbe(env);
 health = JSON.parse(env.raw.get("tv_health"));
-assert.equal(health.channels.good.working, true, "one bad probe keeps a listed channel");
+assert.equal(health.channels.good.working, true, "one bad probe keeps it working");
 await runTvProbe(env);
 await runTvProbe(env);
 health = JSON.parse(env.raw.get("tv_health"));
@@ -119,9 +121,26 @@ assert.equal(health.channels.good.working, false, "three bad probes in a row dro
 // 4. A changed stream URL starts over: the old verdict doesn't count.
 globalThis.fetch = async (input, init = {}) => routes[String(input.url ?? input)](init.signal, init.headers ?? {});
 const catalog = [channel("good", "https://ok.example/direct.ts")];
-assert.deepEqual(listedChannels(catalog, health), [], "an entry for another URL doesn't list");
+assert.deepEqual(workingChannels(catalog, health), [], "an entry for another URL doesn't count");
 
-// 5. The public playlist: listed channels only, with their stream URLs.
+// 4b. Checks are advice, not a gate: a channel the probe has proved dead is
+// still served. Only `active: false` hides one.
+{
+  const list = [
+    channel("good", "https://ok.example/a.ts"),
+    channel("dead", "https://dead.example/live.m3u8"),
+    channel("off", "https://ok.example/off.ts", { active: false }),
+  ];
+  assert.deepEqual(
+    activeChannels(list).map(c => c.id),
+    ["good", "dead"],
+    "a failed check never hides a channel; an inactive one is never served"
+  );
+}
+
+// 5. The public playlist: every active channel whose URL the app can fetch,
+// checked or not. Channels needing request headers are still left out,
+// because the app can't send them.
 const env2 = kvStore({
   tv_channels: { channels: [
     channel("good", "https://ok.example/live.m3u8", { headers: undefined }),
@@ -137,7 +156,7 @@ assert.match(body, /^#EXTM3U/);
 assert.match(body, /tvg-name="GOOD"/);
 assert.match(body, /group-title="Italy"/);
 assert.match(body, /https:\/\/ok\.example\/live\.m3u8/);
-assert.doesNotMatch(body, /DEAD/, "dead channels are not in the playlist");
+assert.match(body, /tvg-name="DEAD"/, "a channel that failed its check is listed anyway: checks only advise");
 assert.doesNotMatch(body, /WITH-HEADERS/, "channels needing request headers are left out");
 assert.equal(response.headers.get("content-type"), "audio/x-mpegurl; charset=utf-8");
 

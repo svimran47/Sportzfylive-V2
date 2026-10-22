@@ -22,24 +22,25 @@ const PLAY_INDEX_KEY = "play_index";             // matchId -> streamId -> playb
 const EMBED_RESOLVE_KEY_PREFIX = "embed_resolve:"; // source/id/streamNo lookup -> resolved media URL, for /api/play/embed
 const ADMIN_CREDENTIAL_KEY = "admin_credential"; // salted hash of a password set from the admin panel
 
-// The Live TV catalog is public/sports.m3u from this repo (Xtream Codes live
-// streams grouped by country), read from GitHub so a commit to the file
-// reaches the site on the next sync. The Android app gets the same URL as its
-// channel list. Settings that still point at an older list are moved over.
-const DEFAULT_TV_SOURCE_URL = "https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u";
-const LEGACY_TV_SOURCE_URLS = ["https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json", "https://raw.githubusercontent.com/svimran46/channels.m3u/refs/heads/claude/youthful-knuth-czn4sp/sports.m3u"];
+// The Live TV catalog is channels.json on main of svimran46/playlist.m3u (a
+// JavaScript snippet wrapping a JSON list of channels), read from GitHub so a
+// commit to the file reaches the site on the next sync. The Android app gets
+// the same URL as its channel list. Settings that still point at the retired
+// sports.m3u lists are moved over.
+const DEFAULT_TV_SOURCE_URL = "https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json";
+const LEGACY_TV_SOURCE_URLS = ["https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u", "https://raw.githubusercontent.com/svimran46/channels.m3u/refs/heads/claude/youthful-knuth-czn4sp/sports.m3u"];
 const TV_AUTO_SYNC_EVERY_MS = 60 * 60 * 1000;     // cron re-pulls the playlist this often
 const TV_AUTO_RETRY_MS = 30 * 60 * 1000;          // ...and waits this long after a failed pull
 const TV_CHECK_TIMEOUT_MS = 8000;                 // per-URL health check timeout
 const TV_CHECK_BATCH = 25;                        // URLs per health-check request (subrequest budget)
-// Strict playability probe (see runTvProbe). Only channels that delivered
-// real media on consecutive probes are listed on the site and in the app.
+// Strict playability probe (see runTvProbe). Results are advice for the admin:
+// they never hide a channel from the public list (see activeChannels).
 const TV_HEALTH_KEY = "tv_health";                // per-channel probe results, one KV write per run
 const TV_PROBE_BATCH = 100;                       // channels probed per cron run (every 10 minutes)
-const TV_PROBE_CONCURRENCY = 8;
+const TV_PROBE_CONCURRENCY = 2;                   // ...at once. Kept low: providers often allow one connection
 const TV_PROBE_TIMEOUT_MS = 10000;                // covers the whole request, body included
-const TV_PROBE_PASSES_TO_LIST = 2;                // consecutive good probes before a channel is listed
-const TV_PROBE_FAILS_TO_DROP = 3;                 // consecutive bad probes before a listed channel is dropped
+const TV_PROBE_GOOD_TO_WORK = 2;                  // consecutive good probes before a channel reads "working"
+const TV_PROBE_BAD_TO_FAIL = 3;                   // consecutive bad probes before a working channel reads "failed"
 const TV_PROBE_MIN_BYTES = 16 * 1024;
 const TV_APP_PLAYLIST_URL = "https://sportzfylive.svimranmy.workers.dev/api/tv/playlist.m3u";
 const TV_STATE_MEMO_MS = 30 * 1000;               // public routes reuse the parsed catalog this long per isolate
@@ -312,7 +313,7 @@ const SETTINGS_SECTIONS = {
 
   tvSource(input, options) {
     let url = optionalUrl(input.url, "Playlist URL", options) || DEFAULT_TV_SOURCE_URL;
-    // The retired channels.json list is replaced by the default playlist.
+    // The recently retired sports.m3u lists are moved back to channels.json.
     if (LEGACY_TV_SOURCE_URLS.includes(url)) url = DEFAULT_TV_SOURCE_URL;
     const wanted = String(input.defaultCategory ?? "").trim().toLowerCase();
     let defaultCategory = TV_CATEGORIES.find(category => category.toLowerCase() === wanted);
@@ -1693,9 +1694,10 @@ async function clearLegacyFeatured(env, ids) {
 /*
  * Live TV catalog
  *
- * Channels come from a playlist (by default sports.m3u: Xtream Codes live
- * streams grouped by country; any JSON list or M3U file works) plus channels
- * the admin adds by hand. A playlist sync replaces the synced channels and
+ * Channels come from a playlist (by default the channels.json list: a
+ * JavaScript snippet wrapping a JSON channel array; any JSON list, snippet or
+ * M3U file works) plus channels the admin adds by hand. A playlist sync
+ * replaces the synced channels and
  * keeps manual ones; status, order, the proxy switch and an admin-picked
  * category survive re-syncs. Stream URLs never appear in public responses:
  * players go through /api/play/tv/:id, which redirects or proxies.
@@ -2158,7 +2160,9 @@ async function checkStreamUrls(urls, concurrency) {
 // Strict playability probe. Unlike checkStreamUrl (reachability only), this
 // reads real media: an HLS playlist plus its first segment, the start of an
 // MPEG-TS or progressive stream, or a DASH manifest. Web pages (embeds) can't
-// be verified without a browser, so they are never listed.
+// be verified without a browser, so they are never counted as working. What
+// the verdict is used for — the admin's check column, nothing else — is
+// activeChannels' comment below.
 class ProbeError extends Error {}
 
 // Reads up to `limit` bytes and drops the rest of the body.
@@ -2297,14 +2301,29 @@ async function readTvHealth(env) {
   return raw && typeof raw === "object" && raw.channels && typeof raw.channels === "object" ? raw : { channels: {} };
 }
 
-// The channels that may be shown: active, and the latest probe of this exact
-// stream URL marked them working.
-export function listedChannels(channels, health) {
+// The channels whose latest probe of this exact stream URL called working.
+// Used by the admin payload and the probe's own summary — not to filter the
+// public list, which serves every active channel (see activeChannels).
+export function workingChannels(channels, health) {
   return channels.filter(channel => {
     if (channel.active === false) return false;
     const entry = health.channels[String(channel.id)];
     return Boolean(entry && entry.working === true && entry.url === channel.url);
   });
+}
+
+// The channels the public routes serve: every active one.
+//
+// Probing is advice, not a gate. Probes run from Cloudflare's network, not the
+// viewer's, so a provider can refuse every one of them — a line that allows a
+// single connection, a panel that answers only residential IPs, or a transient
+// 4xx/5xx window — while its streams play perfectly on a phone. Gating the
+// directory on that verdict emptied Live TV for every viewer at once and could
+// only recover hours later (100 probes per run, two passes to list a channel),
+// so the check now decides nothing but the admin's per-channel column. See the
+// root README, *Live TV playback checks*.
+export function activeChannels(channels) {
+  return channels.filter(channel => channel.active !== false);
 }
 
 // Cron (every 10 minutes): probes the oldest-checked active channels, a batch
@@ -2341,10 +2360,10 @@ export async function runTvProbe(env) {
     const result = results[index];
     const passes = result.ok ? (previous?.passes || 0) + 1 : 0;
     const fails = result.ok ? 0 : (previous?.fails || 0) + 1;
-    // Hysteresis: a listed channel stays listed through a single bad probe.
+    // Hysteresis: a working channel stays working through a single bad probe.
     const working = result.ok
-      ? previous?.working === true || passes >= TV_PROBE_PASSES_TO_LIST
-      : previous?.working === true && fails < TV_PROBE_FAILS_TO_DROP;
+      ? previous?.working === true || passes >= TV_PROBE_GOOD_TO_WORK
+      : previous?.working === true && fails < TV_PROBE_BAD_TO_FAIL;
     health.channels[id] = {
       url: channel.url,
       working,
@@ -2359,14 +2378,14 @@ export async function runTvProbe(env) {
   });
   health.updatedAt = now;
   await env.SPORTZFY_DB.put(TV_HEALTH_KEY, JSON.stringify(health));
-  const listed = listedChannels(active, health).length;
-  return { checked: batch.length, listed, active: active.length };
+  return { checked: batch.length, working: workingChannels(active, health).length, active: active.length };
 }
 
 // What the admin page shows for one channel's stream check:
-//   working    listed for viewers (2 good probes in a row, not yet 3 bad)
-//   verifying  last probe good, waiting for the second before listing
-//   failed     last probe bad and not listed; `reason` says why
+//   working    passed 2 probes in a row (and not yet 3 bad ones)
+//   verifying  last probe good, waiting for the second before it reads working
+//   failed     last probe bad; `reason` says why. Still served to viewers —
+//              the row's active flag, not the check, decides that.
 //   unchecked  never probed on its current URL (inactive channels stay here)
 export function channelCheck(channel, health) {
   const entry = health?.channels?.[String(channel.id)];
@@ -2392,8 +2411,9 @@ export function checkSummary(channels, health) {
   return { ...counts, updatedAt: health?.updatedAt || null, batch: TV_PROBE_BATCH };
 }
 
-// M3U of the listed channels for the app. Channels that need custom request
-// headers are left out: the app can't send them.
+// M3U of the active channels for the app. Channels that need custom request
+// headers are left out: the app can't send them. Stream checks don't filter
+// this list (see activeChannels).
 function tvPlaylistM3u(channels) {
   const clean = (value) => String(value ?? "").replace(/[\r\n",]+/g, " ").replace(/\s+/g, " ").trim();
   const lines = ["#EXTM3U"];
@@ -2438,9 +2458,10 @@ function publicChannel(channel) {
     category: TV_CATEGORIES.includes(channel.category) ? channel.category : channelCategory(channel.group, channel.name),
     group: String(channel.group ?? ""),
     kind: streamKind(channel.url),
-    // Embedded channels run sandboxed by default: the catalog opts a channel
-    // out with an explicit "sandbox": false.
-    sandbox: channel.sandbox !== false
+    // "sandbox": true in the playlist (or an admin tick) sandboxes a channel's
+    // page. Everything else loads directly, because some channels render a
+    // black frame inside a sandbox.
+    sandbox: Boolean(channel.sandbox)
   };
 }
 
@@ -3434,8 +3455,8 @@ async function storageReport(env) {
 async function handlePublicTv(request, env, url, ctx) {
   if (request.method === "GET" && url.pathname === "/api/tv/playlist.m3u") {
     const state = await readTvStateCached(env);
-    const listed = orderedChannels(listedChannels(state?.channels || [], await readTvHealth(env)));
-    return new Response(tvPlaylistM3u(listed), {
+    const channels = orderedChannels(activeChannels(state?.channels || []));
+    return new Response(tvPlaylistM3u(channels), {
       headers: { "Content-Type": "audio/x-mpegurl; charset=utf-8", "Cache-Control": "public, max-age=300" }
     });
   }
@@ -3451,7 +3472,7 @@ async function handlePublicTv(request, env, url, ctx) {
         state = emptyTvState();
       }
     }
-    const channels = orderedChannels(listedChannels(state.channels, await readTvHealth(env))).map(publicChannel);
+    const channels = orderedChannels(activeChannels(state.channels)).map(publicChannel);
     const present = new Set(channels.map(channel => channel.category));
     return cachedJson({
       channels,
@@ -3606,7 +3627,7 @@ async function handleAdminTv(request, env, url) {
     return adminJson({
       updatedAt: health.updatedAt || null,
       active: active.length,
-      listed: listedChannels(active, health).length,
+      working: workingChannels(active, health).length,
       channels: health.channels
     });
   }

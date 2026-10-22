@@ -40,7 +40,7 @@ data class AppConfig(
     companion object {
         const val DEFAULT_STREAM_PROXY_URL = "https://sportzfylive.svimranmy.workers.dev"
 
-        const val DEFAULT_CHANNELS_URL = "https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u"
+        const val DEFAULT_CHANNELS_URL = "https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json"
 
         val Default = AppConfig()
     }

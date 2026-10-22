@@ -82,7 +82,7 @@ fun AboutScreen(
                     title = "Where the content comes from",
                     lines = listOf(
                         "Matches and streams: Streamed (streamed.pk)",
-                        "Live TV channels: the Sportzfylive sports.m3u playlist",
+                        "Live TV channels: the Sportzfy channels.json playlist",
                     ),
                 )
                 AboutCard(
