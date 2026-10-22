@@ -16,6 +16,12 @@ data class Channel(
      * `group-title` such as "Italy", or a JSON `country`); null when it gives none.
      */
     val country: String? = null,
+    /**
+     * The directory's `sandbox` flag: run this channel's page in a sandboxed
+     * iframe. Read from `channels.json`; M3U playlists carry no such flag.
+     * The owner can also sandbox every channel via the app's remote config.
+     */
+    val sandboxed: Boolean = false,
 ) {
     /** Host serving the stream, shown as the channel's source. */
     val sourceHost: String

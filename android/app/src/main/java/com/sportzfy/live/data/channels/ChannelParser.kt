@@ -11,7 +11,9 @@ import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * One entry of `channels.json`. `category` is optional and overrides name-based grouping.
- * A `sandbox` key (used by the website) is ignored: the app never sandboxes a channel. `type`
+ * `sandbox` marks a channel whose page must run in a sandboxed iframe; it is read
+ * loosely, so any value other than true (boolean or the string "true") leaves the
+ * channel unsandboxed and a wrong type never drops the channel. `type`
  * (`"hls"`, `"dash"`, `"ts"`, `"embed"`…) says how to play a URL whose extension
  * doesn't, like an IPTV feed at `http://host:8080/user/pass/123`.
  */
@@ -22,11 +24,16 @@ internal data class ChannelDto(
     val genre: String? = null,
     val url: String? = null,
     val category: String? = null,
+    val sandbox: JsonElement? = null,
     val type: JsonElement? = null,
     val country: String? = null,
 )
 
 private fun JsonElement?.text(): String? = (this as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+/** True only for the boolean `true` or the string `"true"`; anything else stays off. */
+private fun JsonElement?.isTrue(): Boolean =
+    (this as? JsonPrimitive)?.content?.equals("true", ignoreCase = true) == true
 
 /** A channel as read from either list format, before validation. */
 private class RawChannel(
@@ -36,6 +43,7 @@ private class RawChannel(
     val category: String?,
     val format: StreamFormat? = null,
     val country: String? = null,
+    val sandboxed: Boolean = false,
 )
 
 /**
@@ -82,6 +90,7 @@ object ChannelParser {
                 category = dto.category,
                 format = StreamFormat.fromHint(dto.type.text()),
                 country = dto.country,
+                sandboxed = dto.sandbox.isTrue(),
             )
         }
     }
@@ -159,6 +168,7 @@ object ChannelParser {
                 streamUrl = url,
                 streamFormat = entry.format,
                 country = entry.country?.let(::decodeEntities)?.trim()?.takeIf { it.isNotEmpty() },
+                sandboxed = entry.sandboxed,
             )
         }
     }

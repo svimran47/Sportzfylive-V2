@@ -6,9 +6,11 @@ package com.sportzfy.live.core.player
  */
 object AdHosts {
     /**
-     * Pop-under and redirect networks the top-level page may never navigate
-     * to, whatever the remote config says. Their scripts still load: the
-     * embeds' inline player setup calls into them.
+     * Pop-under and redirect networks the player refuses on every stream,
+     * whatever the remote config says: the top-level page may never navigate
+     * to them, and their frames, images and beacons are answered with an
+     * empty success. Their scripts still load: the embeds' inline player
+     * setup calls into them.
      */
     val ALWAYS_BLOCKED: Set<String> = setOf(
         "popads.net",
@@ -22,7 +24,7 @@ object AdHosts {
         "histats.com",
     )
 
-    /** Top-level navigations to these are refused when ad blocking is on. */
+    /** Top-level navigations and frames to these are refused when ad blocking is on. */
     val DEFAULT: Set<String> = setOf(
         // Display / programmatic
         "doubleclick.net",

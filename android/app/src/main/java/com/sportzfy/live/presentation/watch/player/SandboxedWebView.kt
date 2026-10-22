@@ -83,15 +83,17 @@ internal class PageLanding {
  *   redirects and app links are cancelled, while nested player iframes load
  *   freely;
  * - the page's own scripts (ad scripts included) are never blocked, because
- *   inline player setup code calls into them; only hosts the owner adds
- *   remotely get an empty response;
+ *   inline player setup code calls into them; from the hosts the policy
+ *   blocks, ad frames, images, beacons and XHR get an empty response instead;
  * - one document-start script ([PopupShim]) keeps `window.open` from ever
  *   answering `null`, which embed.st's player reads as a sandbox; a real
  *   window still comes from the native call and is trapped as above;
  * - no file or content access, downloads, geolocation or permission grants.
  *
  * [policy] is read on every request, so a new stream or remote config change
- * applies to a live player without rebuilding it.
+ * applies to a live player without rebuilding it. [onResource] sees every
+ * request just before the policy does, which the embed resolver uses to spot
+ * the media manifest (see [EmbedManifest]).
  */
 @SuppressLint("SetJavaScriptEnabled")
 internal fun createSandboxedWebView(
@@ -99,6 +101,7 @@ internal fun createSandboxedWebView(
     policy: () -> PlayerUrlPolicy,
     landing: PageLanding,
     listener: SandboxListener,
+    onResource: ((WebResourceRequest) -> Unit)? = null,
 ): WebView = WebView(context).apply {
     settings.apply {
         javaScriptEnabled = true
@@ -153,7 +156,7 @@ internal fun createSandboxedWebView(
         next != null && next !== view && next.requestFocus(direction)
     }
 
-    webViewClient = SandboxedWebViewClient(policy, landing, listener)
+    webViewClient = SandboxedWebViewClient(policy, landing, listener, onResource)
     webChromeClient = SandboxedChromeClient(listener)
 }
 
@@ -221,6 +224,7 @@ private class SandboxedWebViewClient(
     private val policy: () -> PlayerUrlPolicy,
     private val landing: PageLanding,
     private val listener: SandboxListener,
+    private val onResource: ((WebResourceRequest) -> Unit)? = null,
 ) : WebViewClient() {
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -239,8 +243,13 @@ private class SandboxedWebViewClient(
 
     // Runs on a WebView background thread; must not touch UI state.
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-        if (policy().resource(request.url.toString()) == PlayerUrlPolicy.Decision.BLOCK) return emptySuccess(request)
-        return null
+        onResource?.invoke(request)
+        val decision = policy().resource(
+            request.url.toString(),
+            destination = request.header("Sec-Fetch-Dest"),
+            accept = request.header("Accept"),
+        )
+        return if (decision == PlayerUrlPolicy.Decision.BLOCK) emptySuccess(request) else null
     }
 
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
@@ -321,13 +330,17 @@ private class SandboxedChromeClient(
 /** How long a trapped pop-up's window stays open to its opener before it is destroyed. */
 private const val POPUP_LIFETIME_MS = 1_500L
 
+/** A request header by name, whatever case the WebView used for the key. */
+internal fun WebResourceRequest.header(name: String): String? =
+    requestHeaders.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+
 /**
  * Answer for a refused request: an empty 200 rather than a network error, so
  * a script tag's onload and a fetch() both succeed and the embed's "did the
  * ad load" checks pass. CORS is opened for the same reason.
  */
 private fun emptySuccess(request: WebResourceRequest): WebResourceResponse {
-    val accept = request.requestHeaders["Accept"].orEmpty()
+    val accept = request.header("Accept").orEmpty()
     val path = request.url.path.orEmpty()
     val mime = when {
         path.endsWith(".js") || "javascript" in accept -> "application/javascript"

@@ -16,6 +16,8 @@ internal data class RemoteConfigDto(
     val adBlocking: Boolean? = null,
     val extraBlockedHosts: List<String>? = null,
     val playerMode: String? = null,
+    val embedSandbox: Boolean? = null,
+    val embedResolve: Boolean? = null,
     val minVersionCode: Int? = null,
     val updateUrl: String? = null,
     val maintenance: MaintenanceDto? = null,
@@ -57,6 +59,9 @@ object AppConfigParser {
                 "iframe" -> PlayerMode.IFRAME
                 else -> PlayerMode.DIRECT
             },
+            // Missing means the app's own default, which sandboxes.
+            embedSandbox = dto.embedSandbox ?: true,
+            embedResolve = dto.embedResolve ?: true,
             minVersionCode = dto.minVersionCode?.coerceAtLeast(0) ?: 0,
             updateUrl = httpsOrNull(dto.updateUrl),
             maintenanceMessage = dto.maintenance?.takeIf { it.enabled == true }?.let {
