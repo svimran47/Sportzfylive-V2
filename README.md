@@ -14,7 +14,7 @@ A modern, responsive web application for streaming live sports matches and 24/7 
 - ⚠️ **Error Handling**: Per-source failure isolation — one bad Streamed source never breaks a match list
 - 🎯 **Watch page**: match identity (crests + share) on top, the player, stream chips labelled with language/provider/HD, then a rail of other matches — all rendered from the match list already in memory, so opening a match costs no extra requests
 - 🔗 **Shareable matches**: share buttons emit `#match=<id>` links, and the site opens that match directly on load
-- 📺 **Live TV** (`/live-tv`): the sports channels from [`sports.m3u`](https://github.com/svimran46/channels.m3u/tree/claude/youthful-knuth-czn4sp) (built by `build_sports_m3u.py`) — country filter, sport chips, search, a universal player (HLS, MPEG-TS, DASH, FLV, MP4/WebM, audio, embeds) with previous/next, reload, full screen and share, `#ch=<id>` deep links, and an "Up next" rail on wide screens
+- 📺 **Live TV** (`/live-tv`): the channels from the [`channels.json`](https://github.com/svimran46/playlist.m3u) list on `main` — country filter, sport chips, search, a universal player (HLS, MPEG-TS, DASH, FLV, MP4/WebM, audio, embeds) with previous/next, reload, full screen and share, `#ch=<id>` deep links, and an "Up next" rail on wide screens
 - 🛠️ **Admin panel** (`/admin`): dashboard, match management (filters, bulk actions, featured/active flags, streams picked from the TV catalog), Live TV channel management (playlist sync, import from URL with stream health checks), fetch logs and site settings — no redeploy needed for any of it
 - 📱 **Responsive Design**: Fully responsive grid layout for mobile, tablet, and desktop
 - 🎨 **Modern UI**: Dark theme with smooth animations and transitions
@@ -143,8 +143,8 @@ Cleanup). A match the feed reports live is never removed.
 
 `/live-tv` lists the active channels from the Worker's catalog. The catalog is
 synced from the TV source playlist — by default the latest commit of
-`sports.m3u` on the `claude/youthful-knuth-czn4sp` branch of
-`svimran46/channels.m3u` (2,230 sports channels in 89 country groups). It is
+`channels.json` on `main` of `svimran46/playlist.m3u` (a JavaScript snippet
+wrapping a JSON list of named channels). It is
 seeded on first use, re-synced every hour by the cron when *Re-sync
 automatically* is on (and at once when the source URL changes), and on demand
 from the admin. A sync replaces every synced channel, so only the playlist's

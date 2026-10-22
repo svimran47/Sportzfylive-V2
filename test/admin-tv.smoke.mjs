@@ -114,7 +114,7 @@ const admin = (path, method = "GET", body) =>
 // (any supported format works there), and an M3U playlist.
 // ---------------------------------------------------------------------------
 
-const PLAYLIST_URL = "https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u";
+const PLAYLIST_URL = "https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json";
 const channelsJs = (list) => "const channels = " + JSON.stringify(list, null, 2) + ";\n";
 const UPSTREAM = [
   { name: "ESPN", logo: "https://img.example/espn.png?a=1&amp;amp;b=2", genre: "Sports", url: "https://tv.example/espn", sandbox: true },
@@ -352,9 +352,9 @@ console.log("# settings");
   const badCategory = await admin("/api/admin/settings/tvSource", "PUT", { defaultCategory: "Quidditch" });
   assert.equal(badCategory.status, 400);
   const legacy = await (await admin("/api/admin/settings/tvSource", "PUT", {
-    url: "https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json", defaultCategory: "entertainment"
+    url: "https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u", defaultCategory: "entertainment"
   })).json();
-  assert.equal(legacy.settings.tvSource.url, PLAYLIST_URL, "the retired channels.json source maps to the default");
+  assert.equal(legacy.settings.tvSource.url, PLAYLIST_URL, "the retired sports.m3u source maps to the default");
   assert.equal(legacy.settings.tvSource.defaultCategory, "Entertainment");
   assert.equal(legacy.tvSync, undefined, "same source: no resync");
   await admin("/api/admin/settings/tvSource", "PUT", { defaultCategory: "Sports" });

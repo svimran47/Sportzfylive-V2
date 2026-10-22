@@ -22,12 +22,13 @@ const PLAY_INDEX_KEY = "play_index";             // matchId -> streamId -> playb
 const EMBED_RESOLVE_KEY_PREFIX = "embed_resolve:"; // source/id/streamNo lookup -> resolved media URL, for /api/play/embed
 const ADMIN_CREDENTIAL_KEY = "admin_credential"; // salted hash of a password set from the admin panel
 
-// The Live TV catalog is public/sports.m3u from this repo (Xtream Codes live
-// streams grouped by country), read from GitHub so a commit to the file
-// reaches the site on the next sync. The Android app gets the same URL as its
-// channel list. Settings that still point at an older list are moved over.
-const DEFAULT_TV_SOURCE_URL = "https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u";
-const LEGACY_TV_SOURCE_URLS = ["https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json", "https://raw.githubusercontent.com/svimran46/channels.m3u/refs/heads/claude/youthful-knuth-czn4sp/sports.m3u"];
+// The Live TV catalog is channels.json on main of svimran46/playlist.m3u (a
+// JavaScript snippet wrapping a JSON list of channels), read from GitHub so a
+// commit to the file reaches the site on the next sync. The Android app gets
+// the same URL as its channel list. Settings that still point at the retired
+// sports.m3u lists are moved over.
+const DEFAULT_TV_SOURCE_URL = "https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json";
+const LEGACY_TV_SOURCE_URLS = ["https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u", "https://raw.githubusercontent.com/svimran46/channels.m3u/refs/heads/claude/youthful-knuth-czn4sp/sports.m3u"];
 const TV_AUTO_SYNC_EVERY_MS = 60 * 60 * 1000;     // cron re-pulls the playlist this often
 const TV_AUTO_RETRY_MS = 30 * 60 * 1000;          // ...and waits this long after a failed pull
 const TV_CHECK_TIMEOUT_MS = 8000;                 // per-URL health check timeout
@@ -312,7 +313,7 @@ const SETTINGS_SECTIONS = {
 
   tvSource(input, options) {
     let url = optionalUrl(input.url, "Playlist URL", options) || DEFAULT_TV_SOURCE_URL;
-    // The retired channels.json list is replaced by the default playlist.
+    // The recently retired sports.m3u lists are moved back to channels.json.
     if (LEGACY_TV_SOURCE_URLS.includes(url)) url = DEFAULT_TV_SOURCE_URL;
     const wanted = String(input.defaultCategory ?? "").trim().toLowerCase();
     let defaultCategory = TV_CATEGORIES.find(category => category.toLowerCase() === wanted);
@@ -1693,9 +1694,10 @@ async function clearLegacyFeatured(env, ids) {
 /*
  * Live TV catalog
  *
- * Channels come from a playlist (by default sports.m3u: Xtream Codes live
- * streams grouped by country; any JSON list or M3U file works) plus channels
- * the admin adds by hand. A playlist sync replaces the synced channels and
+ * Channels come from a playlist (by default the channels.json list: a
+ * JavaScript snippet wrapping a JSON channel array; any JSON list, snippet or
+ * M3U file works) plus channels the admin adds by hand. A playlist sync
+ * replaces the synced channels and
  * keeps manual ones; status, order, the proxy switch and an admin-picked
  * category survive re-syncs. Stream URLs never appear in public responses:
  * players go through /api/play/tv/:id, which redirects or proxies.
@@ -2456,9 +2458,10 @@ function publicChannel(channel) {
     category: TV_CATEGORIES.includes(channel.category) ? channel.category : channelCategory(channel.group, channel.name),
     group: String(channel.group ?? ""),
     kind: streamKind(channel.url),
-    // Embedded channels run sandboxed by default: the catalog opts a channel
-    // out with an explicit "sandbox": false.
-    sandbox: channel.sandbox !== false
+    // "sandbox": true in the playlist (or an admin tick) sandboxes a channel's
+    // page. Everything else loads directly, because some channels render a
+    // black frame inside a sandbox.
+    sandbox: Boolean(channel.sandbox)
   };
 }
 

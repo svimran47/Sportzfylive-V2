@@ -1,6 +1,7 @@
-// Functional smoke test for Live TV playback through the Worker: the
-// sports.m3u playlist shape (groups, http Xtream streams, http logos), the
-// stream proxy (http and raw MPEG-TS streams, request headers, HLS playlist
+// Functional smoke test for Live TV playback through the Worker: playlist
+// formats (an IPTV M3U shape: groups, http Xtream streams, http logos; and the
+// channels.json JS snippet),
+// the stream proxy (http and raw MPEG-TS streams, request headers, HLS playlist
 // rewriting, DASH, sealed /s/ and /b/ tokens, Range), the logo proxy, the
 // default category and the playlist source switch.
 // Drives the real worker.js with Node's native Request/Response/Headers and a
@@ -12,8 +13,8 @@ import assert from "node:assert/strict";
 const worker = (await import("../worker.js")).default;
 
 const BASE = "https://worker.test";
-const PLAYLIST_URL = "https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u";
-const LEGACY_URL = "https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json";
+const PLAYLIST_URL = "https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json";
+const LEGACY_URL = "https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u";
 
 // Strings that must never reach a viewer: upstream hosts and the login.
 const SECRETS = [
@@ -150,7 +151,7 @@ let passed = 0;
 const ok = (name) => { passed += 1; console.log("  ok " + passed + " - " + name); };
 
 // ---------------------------------------------------------------------------
-// Fixture: shaped exactly like sports.m3u (header with url-tvg, tvg-id /
+// Fixture: shaped like the M3U playlists IPTV panels publish (header with url-tvg, tvg-id /
 // tvg-name / tvg-logo / group-title, http Xtream live .ts streams, names
 // repeated across groups) plus a few channels exercising other formats.
 // ---------------------------------------------------------------------------
@@ -185,7 +186,7 @@ upstream[PLAYLIST_URL] = () => respond(SPORTS_M3U, { headers: { "Content-Type": 
 const env = makeEnv();
 const admin = await adminSession(env);
 
-console.log("# sports.m3u catalog");
+console.log("# M3U playlist catalog");
 
 let catalog;
 {
@@ -239,7 +240,7 @@ let catalog;
   assert.ok(!("headers" in stored.channels.find(c => c.id === "italy-eurosport-2-hd")), "no headers: the field is omitted");
   assert.equal(stored.source, PLAYLIST_URL);
 }
-ok("sports.m3u-shaped playlist: group ids, kinds, categories, groups, logo paths, nothing private in public JSON");
+ok("M3U-shaped playlist: group ids, kinds, categories, groups, logo paths, nothing private in public JSON");
 
 {
   const list = (await (await admin("/api/admin/tv/channels")).json()).channels;
@@ -781,8 +782,8 @@ ok("tvSource.defaultCategory is the fallback for playlist and manual channels");
 ok("saving a new playlist source resyncs at once and reports failures");
 
 {
-  // Deployments that saved settings (and synced) with the old channels.json
-  // list switch to sports.m3u on the next cron run, even within the hour.
+  // Deployments that saved settings (and synced) with the retired sports.m3u
+  // list go back to channels.json on the next cron run, even within the hour.
   const legacyEnv = makeEnv();
   const db = legacyEnv.SPORTZFY_DB;
   const recent = new Date(Date.now() - 5 * 60 * 1000).toISOString();
@@ -797,7 +798,7 @@ ok("saving a new playlist source resyncs at once and reports failures");
   }));
   const admin2 = await adminSession(legacyEnv);
   const settings = (await (await admin2("/api/admin/settings")).json()).settings;
-  assert.equal(settings.tvSource.url, PLAYLIST_URL, "a stored legacy URL reads as the new default");
+  assert.equal(settings.tvSource.url, PLAYLIST_URL, "a stored sports.m3u URL reads as the channels.json default");
   assert.equal(settings.tvSource.defaultCategory, "Sports");
 
   upstream[PLAYLIST_URL] = () => respond(SPORTS_M3U);
@@ -809,7 +810,7 @@ ok("saving a new playlist source resyncs at once and reports failures");
   assert.equal(state.source, PLAYLIST_URL);
   assert.equal(state.lastSync.trigger, "cron");
   const ids = state.channels.map(c => c.id);
-  assert.ok(!ids.includes("old-channel"), "channels.json channels are gone");
+  assert.ok(!ids.includes("old-channel"), "the old list's channels are gone");
   assert.ok(ids.includes("my-channel"), "manual channels are kept");
   const inherited = state.channels.find(c => c.id === "eurosport-2-hd");
   assert.equal(inherited.group, "France", "an old group-less record is matched by name once");
@@ -846,7 +847,7 @@ ok("saving a new playlist source resyncs at once and reports failures");
     restoreClock();
   }
 }
-ok("legacy source URL maps to sports.m3u and the cron syncs at once on a source change, hourly after, 30 min after failures");
+ok("legacy source URL maps to channels.json and the cron syncs at once on a source change, hourly after, 30 min after failures");
 
 {
   // No Worker secret: a random key is generated once and kept in KV.

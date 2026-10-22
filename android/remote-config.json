@@ -14,5 +14,5 @@
     "enabled": false,
     "message": ""
   },
-  "channelsUrl": "https://raw.githubusercontent.com/svimran46/Sportzfylive-V2/main/public/sports.m3u"
+  "channelsUrl": "https://raw.githubusercontent.com/svimran46/playlist.m3u/main/channels.json"
 }
