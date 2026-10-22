@@ -128,13 +128,13 @@ const UPSTREAM = [
 
 console.log("# Live TV catalog");
 
-// First public read seeds the catalog from the default playlist. Nothing is
-// listed until the strict probe has verified it.
+// First public read seeds the catalog from the default playlist. Stream checks
+// are advice, so the whole active catalog is served rather than an empty one.
 routes[PLAYLIST_URL] = reply(200, channelsJs(UPSTREAM));
 {
   const res = await call("/api/tv/channels");
   assert.equal(res.status, 200);
-  assert.deepEqual((await res.json()).channels, [], "unprobed channels are not listed");
+  assert.ok((await res.json()).channels.length > 0, "an unprobed catalog is served, not emptied");
   // Stand in for the cron probe: every synced channel verified on its current URL.
   const seeded = JSON.parse(kv.store.get("tv_channels")).channels;
   kv.store.set("tv_health", JSON.stringify({ channels: Object.fromEntries(seeded.map(c => [c.id, { url: c.url, working: true }])) }));

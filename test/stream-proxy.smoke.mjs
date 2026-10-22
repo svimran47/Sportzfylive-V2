@@ -189,9 +189,12 @@ console.log("# sports.m3u catalog");
 
 let catalog;
 {
-  // The first read seeds the catalog; nothing is listed until the probe verifies it.
+  // The first read seeds the catalog. Stream checks are advice, so the whole
+  // active catalog is served whether or not anything has been probed.
   const unverified = await call(env, "/api/tv/channels");
-  assert.deepEqual(JSON.parse(await unverified.text()).channels, [], "unprobed channels are not listed");
+  const unprobed = JSON.parse(await unverified.text());
+  assert.ok(unprobed.channels.length > 0, "an unprobed catalog is served, not emptied");
+  assert.ok(unprobed.channels.some(c => c.id === "italy-eurosport-2-hd"), "…with its channels in it");
   // Stand in for the cron probe: every synced channel verified on its current URL.
   const seeded = JSON.parse(env.SPORTZFY_DB.store.get("tv_channels")).channels;
   env.SPORTZFY_DB.store.set("tv_health", JSON.stringify({ channels: Object.fromEntries(seeded.map(c => [c.id, { url: c.url, working: true }])) }));

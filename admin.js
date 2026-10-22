@@ -1054,9 +1054,9 @@ const TV_CHIPS = [["all", "all"], ["active", "active"], ["inactive", "inactive"]
 
 // Stream check states from the Worker's probe (see channelCheck in worker.js).
 const CHECK_PILLS = {
-  working: ["", "Working", "Passed the stream check: shown on the site and in the app"],
-  verifying: ["amber", "Verifying", "One good check; listed after the next one passes"],
-  failed: ["red", "Failed", "Failed the stream check: hidden from viewers"],
+  working: ["", "Working", "Passed the stream check — advice only: checks never hide a channel"],
+  verifying: ["amber", "Verifying", "One good check so far; called working after the next one passes"],
+  failed: ["red", "Failed", "Failed the stream check — still listed; turn the channel off to hide it"],
   unchecked: ["grey", "Not checked", "Not checked yet on its current stream URL"]
 };
 const checkState = (c) => c.check?.state || "unchecked";
@@ -1152,14 +1152,15 @@ function checkLine(tv) {
   const c = tv.checks;
   if (!c) return "";
   const parts = [
-    '<span class="green">' + c.working + " working</span> (shown to viewers)",
+    '<span class="green">' + c.working + " working</span>",
     c.verifying ? '<span class="amber">' + c.verifying + " verifying</span>" : "",
     c.failed ? '<span class="red">' + c.failed + " failed</span>" : "",
     c.unchecked ? c.unchecked + " not checked yet" : "",
     c.updatedAt ? "last run " + esc(ago(c.updatedAt)) : "no check has run yet",
   ].filter(Boolean);
   return '<p class="hint" style="font-size:15px;margin-top:4px">Stream checks: ' + parts.join(" · ") +
-    " · " + c.batch + " channels every 10 minutes</p>";
+    " · " + c.batch + " channels every 10 minutes · <b>advice only</b>: every active channel is listed on " +
+    "the site and in the app whether or not a check has passed. Turn a channel off below to hide it.</p>";
 }
 
 async function renderChannels() {

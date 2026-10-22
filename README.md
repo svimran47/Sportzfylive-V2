@@ -26,12 +26,16 @@ The Worker probes every active Live TV channel on the 10-minute cron, 100 per ru
 - **HLS:** the playlist must list a segment, and that segment must be MPEG-TS (sync bytes) or fMP4 with at least 16 KB of data. Master playlists are followed one level.
 - **MPEG-TS / FLV / progressive:** at least 16 KB of data with valid container bytes; an HTML page fails.
 - **DASH:** the manifest must be a valid MPD. Segments are not fetched, so DASH is verified less strictly than HLS.
-- **Web-page embeds:** never listed, because they can't be verified without a browser.
+- **Web-page embeds:** never *verified* — they can't be probed without a browser.
 - Probes time out after 10 seconds, and that limit covers the body read too.
 
-Hysteresis: a channel is listed after 2 good probes in a row and dropped after 3 bad ones in a row. A changed stream URL starts over. Results are one KV record (`tv_health`), written once per run, and `GET /api/admin/tv/health` returns them. The public channel list, the site's Live TV page and `/api/tv/playlist.m3u` (which the app reads) show only listed channels.
+Results are one KV record (`tv_health`), written once per run, and `GET /api/admin/tv/health` returns them. A channel is called *working* after 2 good probes in a row and *failed* after 3 bad ones in a row; a changed stream URL starts over, and a channel that has not been probed yet is *unchecked*.
 
-Probes run from Cloudflare's network, not the viewer's, so a channel that is blocked only for some countries can be listed here and still fail for a viewer there. A channel that needs custom request headers is probed with them, but left out of the app playlist because the app can't send them.
+**Checks are advice, never a gate.** The public channel list, the site's Live TV page and `/api/tv/playlist.m3u` (which the app reads) serve **every active channel** — checked or not, working or failed — and only `active: false` (or a missing stream URL, or one that needs custom request headers the app can't send) leaves a channel out. The probes fill the admin's per-channel check column so the owner can see which streams are dead; they cannot hide a channel from viewers.
+
+That is deliberate, because a probe is not evidence about a viewer: probes run from Cloudflare's network, not the viewer's device. A panel that refuses Cloudflare's egress entirely (a line allowing a single connection, a provider that answers only residential IPs, or a transient 4xx/5xx window) makes every probe fail while the streams play perfectly on a phone. Gating the directory on that verdict emptied Live TV for every viewer at once, and it could not recover quickly either — 100 probes per run, oldest first, two passes before a channel lists — so the check reports and nothing more.
+
+A channel that needs custom request headers is probed with them, but left out of the app playlist because the app can't send them.
 
 ## Architecture
 
