@@ -1750,8 +1750,10 @@ async function renderApp() {
         '<div class="field"><label for="ap-pm">Embed mode</label><select id="ap-pm" name="playerMode" class="select">' +
           option("direct", "Direct — page loads like a browser tab (recommended)", a.playerMode) +
           option("iframe", "Iframe — embed inside a plain iframe, like the website", a.playerMode) + "</select></div>" +
-        switchRow("adBlocking", "Built-in ad blocking", "Off by default: most stream sites are paid for by their ads and refuse to play while they are blocked.", a.adBlocking) +
-        '<div class="field" style="margin-top:12px"><label for="ap-bh">Extra blocked hosts</label><textarea id="ap-bh" name="extraBlockedHosts" class="textarea mono" style="min-height:90px" placeholder="ads.example.com">' + esc(a.extraBlockedHosts.join("\n")) + "</textarea><div class=\"hint\">One host per line. Applies to pop-ups and sub-resources in the player.</div></div>" +
+        switchRow("adBlocking", "Built-in ad blocking", "Off by default. Refuses the ad networks' frames, images and beacons; their scripts still load, so playback keeps working.", a.adBlocking) +
+        switchRow("embedSandbox", "Sandbox embeds", "On by default. Runs the stream page in a sandboxed iframe, so pop-ups, redirects, downloads and pointer lock are refused by the frame itself, not just by the app. Turn it off for a stream that refuses to play inside a sandbox.", a.embedSandbox) +
+        switchRow("embedResolve", "Native match playback", "On by default. Runs the embed in a hidden page just long enough to find its real stream URL, then plays that in the app's own player: no ads, picture-in-picture, background audio. If it can't be found, the web player is used as before.", a.embedResolve) +
+        '<div class="field" style="margin-top:12px"><label for="ap-bh">Extra blocked hosts</label><textarea id="ap-bh" name="extraBlockedHosts" class="textarea mono" style="min-height:90px" placeholder="ads.example.com">' + esc(a.extraBlockedHosts.join("\n")) + "</textarea><div class=\"hint\">One host per line. Applies to pop-ups, frames and other sub-resources, but never to scripts.</div></div>" +
         saveRow("Save player settings", "app") + "</form>") +
     card("app-sources", "inbox", "Data sources", "Where the app loads its channel list and falls back to when a stream host blocks the phone.",
       '<form data-submit="app-sources">' +
@@ -1907,7 +1909,7 @@ const SETTINGS_SUBMIT = {
     hiddenCategories: $$('input[name="hide"]:checked', f).map(input => input.value)
   }),
   "app-player": (f) => saveAppSection(f, {
-    playerMode: f.elements.playerMode.value, adBlocking: f.elements.adBlocking.checked, extraBlockedHosts: f.elements.extraBlockedHosts.value
+    playerMode: f.elements.playerMode.value, embedSandbox: f.elements.embedSandbox.checked, embedResolve: f.elements.embedResolve.checked, adBlocking: f.elements.adBlocking.checked, extraBlockedHosts: f.elements.extraBlockedHosts.value
   }),
   "app-sources": (f) => saveAppSection(f, {
     channelsUrl: f.elements.channelsUrl.value.trim(), streamProxyEnabled: f.elements.streamProxyEnabled.checked, streamProxyUrl: f.elements.streamProxyUrl.value.trim()

@@ -399,6 +399,8 @@ console.log("# android app config");
   assert.equal(fresh.maintenance.enabled, false);
   assert.equal(fresh.minVersionCode, 0);
   assert.equal(fresh.playerMode, "direct");
+  assert.equal(fresh.embedSandbox, true, "embeds are sandboxed unless the owner turns it off");
+  assert.equal(fresh.embedResolve, true, "match pages resolve to the native player unless turned off");
   assert.ok(!("streamProxyUrl" in fresh), "app default proxy applies when nothing is set");
 
   const settings = await (await admin("/api/admin/settings")).json();
@@ -418,7 +420,7 @@ console.log("# android app config");
     announcementMessage: "  Final tonight!  ", announcementUrl: "https://t.me/sportzfy",
     featuredMatchId: "match-1", hiddenCategories: ["Fight", "motor_sports", "fight"],
     adBlocking: true, extraBlockedHosts: "*.Bad-Ads.com.\nevil.net evil.net",
-    playerMode: "iframe", channelsUrl: "https://example.com/channels.json",
+    playerMode: "iframe", embedSandbox: false, embedResolve: false, channelsUrl: "https://example.com/channels.json",
     streamProxyEnabled: false
   });
   assert.equal(saved.status, 200);
@@ -431,6 +433,8 @@ console.log("# android app config");
     adBlocking: true,
     extraBlockedHosts: ["bad-ads.com", "evil.net"],
     playerMode: "iframe",
+    embedSandbox: false,
+    embedResolve: false,
     minVersionCode: 7,
     updateUrl: "https://example.com/sportzfy.apk",
     maintenance: { enabled: true, message: "Back at 9pm" },
