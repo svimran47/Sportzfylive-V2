@@ -154,6 +154,15 @@ filter); categories (Football, Cricket, Motorsport, Fight, Tennis, Golf,
 Basketball, Horse Racing, Sports, …) come from the name, with *Default
 category* (Settings → TV source) as the fallback.
 
+On top of the playlist source, `public/sportzfy-channels.m3u` — a checked-in
+snapshot of direct HLS channels captured from the original Sportzfy app's own
+channel data (every URL verified HTTP 200 with a valid manifest at capture
+time) — merges into every sync behind the playlist: the playlist wins on URL
+collisions, and a re-sync prunes snapshot channels the snapshot dropped, while
+a snapshot that cannot be read carries its channels over until it answers
+again. Update the snapshot from a fresh runtime capture with
+`node scripts/build-sportzfy-channels.mjs <sportzfy_tv_channels.json>`.
+
 The public channel list never contains stream URLs. Channels play through
 `/api/play/tv/:id`:
 

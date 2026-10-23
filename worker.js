@@ -43,6 +43,18 @@ const TV_PROBE_GOOD_TO_WORK = 2;                  // consecutive good probes bef
 const TV_PROBE_BAD_TO_FAIL = 3;                   // consecutive bad probes before a working channel reads "failed"
 const TV_PROBE_MIN_BYTES = 16 * 1024;
 const TV_APP_PLAYLIST_URL = "https://sportzfylive.svimranmy.workers.dev/api/tv/playlist.m3u";
+
+// Snapshot sources merged into the catalog on every sync, behind the admin
+// playlist. `public/sportzfy-channels.m3u` holds direct HLS channels captured
+// from the original Sportzfy app's own runtime data (2026-10-23, each URL
+// verified HTTP 200 with a valid manifest at capture time — see
+// scripts/build-sportzfy-channels.mjs). They need no request headers, so the
+// app plays them directly from its M3U and the site plays them natively (the
+// hosts send Access-Control-Allow-Origin: *). Derived from the app playlist
+// origin so a custom domain deployment reads its own copy.
+const EXTRA_TV_SOURCES = [
+  { id: "sportzfy", url: new URL(TV_APP_PLAYLIST_URL).origin + "/sportzfy-channels.m3u" }
+];
 const TV_STATE_MEMO_MS = 30 * 1000;               // public routes reuse the parsed catalog this long per isolate
 const MAX_PLAYLIST_ENTRIES = 5000;
 const MAX_PLAYLIST_BYTES = 5 * 1024 * 1024;
@@ -2203,9 +2215,33 @@ async function syncTvChannels(env, tvSource, options = {}) {
   const now = new Date().toISOString();
   let entries;
   let skipped;
+  let extra = { merged: 0, failed: 0 };
+  const failedExtras = new Set();   // snapshot source ids that could not be read
   try {
     ({ entries, skipped } = await fetchPlaylist(tvSource.url, tvSource.timeoutSec * 1000, { defaultCategory: tvSource.defaultCategory }));
     if (!entries.length) throw new InputError("The playlist has no channels with an http or https stream URL");
+    // Snapshot sources merge behind the admin playlist: an entry whose URL
+    // the main list already carries is skipped, so the main list stays
+    // authoritative for every field. A failed snapshot fetch is not a failed
+    // sync — it only merges nothing this round (counted in lastSync.extra).
+    // Entries remember which snapshot source they came from (`extra`), so a
+    // failing source carries its own channels over on the next sync instead
+    // of letting the removal pass prune them.
+    for (const extraSource of EXTRA_TV_SOURCES) {
+      try {
+        const extraSourceData = await fetchPlaylist(extraSource.url, tvSource.timeoutSec * 1000, { defaultCategory: tvSource.defaultCategory });
+        const known = new Set(entries.map(entry => entry.url));
+        for (const entry of extraSourceData.entries) {
+          if (known.has(entry.url)) continue;
+          known.add(entry.url);
+          entries.push({ ...entry, fromExtra: extraSource.id });
+          extra.merged++;
+        }
+      } catch (_) {
+        failedExtras.add(extraSource.id);
+        extra.failed++;
+      }
+    }
   } catch (error) {
     // Record the failure on an existing catalog; a first-time seed that fails
     // leaves nothing behind so the next request tries again.
@@ -2239,11 +2275,29 @@ async function syncTvChannels(env, tvSource, options = {}) {
   let updated = 0;
   const synced = [];
 
+  // A snapshot source that could not be read this round would make all of its
+  // channels look dropped, so until a healthy read of that source proves or
+  // drops them, carry its previous synced channels over as themselves. They
+  // take no ids (matched by URL) and only preserve — never add.
+  if (failedExtras.size) {
+    const present = new Set(entries.map(entry => entry.url));
+    for (const channel of previousSynced) {
+      if (present.has(channel.url) || !failedExtras.has(channel.extra)) continue;
+      present.add(channel.url);
+      entries.push({
+        name: channel.name, group: channel.group, logo: channel.logo, url: channel.url,
+        category: channel.category, sandbox: channel.sandbox, headers: channel.headers || null,
+        fromExtra: channel.extra, carry: true
+      });
+    }
+  }
+
   for (const entry of entries) {
     if (manualUrls.has(entry.url)) continue; // a hand-made copy of the same stream wins
     const previous = unmatched(byUrl.get(entry.url)) ||
       unmatched(byKey.get(slugify(channelIdName(entry.group, entry.name)))) ||
       unmatched(byName.get(slugify(entry.name)));
+    if (entry.carry && !previous) continue; // a carry-over can only preserve, never add
     if (previous) matched.add(previous.id);
 
     const id = previous && !taken.has(previous.id) ? previous.id : uniqueChannelId(channelIdName(entry.group, entry.name), taken);
@@ -2265,6 +2319,7 @@ async function syncTvChannels(env, tvSource, options = {}) {
       url: entry.url,
       ...(headers ? { headers } : {}),
       category,
+      ...(entry.fromExtra ? { extra: entry.fromExtra } : {}),
       categoryLocked: Boolean(previous?.categoryLocked),
       sandbox: entry.sandbox,
       proxy: previous?.proxy === true, // admin-owned: the playlist never sets it
@@ -2282,7 +2337,7 @@ async function syncTvChannels(env, tvSource, options = {}) {
     syncedAt: now,
     source: tvSource.url,
     lastAttemptAt: now,
-    lastSync: { at: now, ok: true, trigger: options.trigger || "admin", added, updated, removed, skipped, total: synced.length + manual.length }
+    lastSync: { at: now, ok: true, trigger: options.trigger || "admin", added, updated, removed, skipped, extra, total: synced.length + manual.length }
   };
   await writeTvState(env, next);
   return next;
