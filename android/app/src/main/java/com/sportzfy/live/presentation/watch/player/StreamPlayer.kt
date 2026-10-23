@@ -34,7 +34,8 @@ import com.sportzfy.live.presentation.components.tvFocus
  * the player WebView for web pages (the `embed.st` players, channel
  * sites). [format] (a channel's `type`) overrides the guess from the URL's
  * extension. Fills [modifier]; the caller decides the aspect ratio.
- * [textureSurface]: see [MediaPlayerView].
+ * [textureSurface]: see [MediaPlayerView]. [drmLicenseUrl]: see
+ * [MediaPlayerView] — a ClearKey DASH channel's license route.
  *
  * An `embed.st` page ([EmbedManifest.isEmbedPlayer]) is first resolved in a
  * hidden WebView — see [EmbedResolverHost] — so its real stream plays in
@@ -48,6 +49,7 @@ fun StreamPlayer(
     config: PlayerConfig = PlayerConfig(),
     format: StreamFormat? = null,
     textureSurface: Boolean = false,
+    drmLicenseUrl: String? = null,
 ) {
     val source = remember(url, format, config.allowHttpStreams, config.extendedFormats) {
         url?.let { PlaybackSource.from(it, format, config.allowHttpStreams, config.extendedFormats) }
@@ -67,7 +69,7 @@ fun StreamPlayer(
     Box(modifier = modifier.background(Color.Black)) {
         when {
             source is PlaybackSource.Media ->
-                MediaPlayerView(source.url, source.format, state, Modifier.fillMaxSize(), textureSurface)
+                MediaPlayerView(source.url, source.format, state, Modifier.fillMaxSize(), textureSurface, drmLicenseUrl = drmLicenseUrl)
 
             stream != null ->
                 MediaPlayerView(stream.url, stream.format, state, Modifier.fillMaxSize(), textureSurface, stream.headers)

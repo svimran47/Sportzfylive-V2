@@ -22,6 +22,13 @@ data class Channel(
      * The owner can also sandbox every channel via the app's remote config.
      */
     val sandboxed: Boolean = false,
+    /**
+     * ClearKey license URL for a DRM'd DASH channel — the Worker's
+     * `/api/drm/tv/:id` route, emitted as the playlist's `drm` attribute.
+     * The app points the ClearKey CDM at it and gets the channel's key pair
+     * back; the playlist itself never carries key material.
+     */
+    val drmLicenseUrl: String? = null,
 ) {
     /** Host serving the stream, shown as the channel's source. */
     val sourceHost: String

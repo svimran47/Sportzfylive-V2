@@ -189,4 +189,90 @@ ok("snapshot re-sync prunes dropped entries and keeps stable ids");
 }
 ok("a failed snapshot fetch does not fail or prune the sync");
 
+// ClearKey DASH snapshot channels: the EXTINF carries clearkey="KID:KEY",
+// the merged channel always plays through the sealed /b/ DASH proxy, the
+// public list names the license route but never the key, and the key route
+// serves the CDM's license JSON to the player and the app.
+{
+  routes[MAIN_PLAYLIST_URL] = reply(200, channelsJs([
+    { name: "ESPN", logo: "", url: "https://tv.example/espn" }
+  ]));
+  const dashM3u = [
+    "#EXTM3U",
+    '#EXTINF:-1 tvg-name="Nova Sports" tvg-logo="https://img.example/nova.png" group-title="Sportzfy" type="dash" clearkey="11223344556677889900112233445566:4b80724d0ef86bcb2c21f7999d67739d",Nova Sports',
+    "https://dash.example/nova/playlist_cenc.mpd",
+    '#EXTINF:-1 tvg-name="Bad Key" group-title="Sportzfy" clearkey="xyz",Bad Key',
+    "https://dash.example/bad/manifest.mpd",
+    '#EXTINF:-1 tvg-name="Keyless" group-title="Sportzfy" type="dash",Keyless',
+    "https://dash.example/keyless/manifest.mpd"
+  ].join("\n") + "\n";
+  routes[SNAPSHOT_URL] = reply(200, dashM3u);
+  const res = await admin("/api/admin/tv/sync", "POST");
+  assert.equal(res.status, 200);
+  const result = await res.json();
+  assert.equal(result.extra.merged, 3, "all three snapshot channels merge (a malformed key is not lethal)");
+  const list = await catalog();
+  const nova = list.find(c => c.id === "sportzfy-nova-sports");
+  assert.equal(nova.kind, "dash", "the admin record sees the DASH channel");
+  assert.equal(nova.clearkey, "11223344556677889900112233445566:4b80724d0ef86bcb2c21f7999d67739d", "the key pair is stored (admin-only view)");
+  assert.equal(nova.proxied, true, "ClearKey DASH channels always play through the Worker");
+  const keyless = list.find(c => c.id === "sportzfy-keyless");
+  assert.equal(keyless.clearkey, undefined, "a malformed key never lands on the channel");
+  assert.equal(keyless.proxied, false, "a keyless https DASH channel plays directly");
+
+  // The public channel API names the license route; the key never travels.
+  const publicList = await (await call("/api/tv/channels")).json();
+  const publicNova = publicList.channels.find(c => c.id === "sportzfy-nova-sports");
+  assert.equal(publicNova.drm, "/api/drm/tv/sportzfy-nova-sports", "the public list names the license route");
+  assert.ok(!JSON.stringify(publicList).includes("4b80724d"), "the public list never carries the key");
+  assert.ok(!publicList.channels.find(c => c.id === "sportzfy-keyless").drm, "a keyless DASH channel has no license route");
+
+  // The license route answers in the ClearKey response shape the CDM reads
+  // (base64url KID/KEY), and 404s for every other channel id.
+  const license = await (await call("/api/drm/tv/sportzfy-nova-sports")).json();
+  assert.deepEqual(license.keys, [{ kty: "oct", kid: "ESIzRFVmd4iZABEiM0RVZg", key: "S4ByTQ74a8ssIfeZnWdznQ" }], "base64url KID/KEY the CDM reads");
+  assert.equal((await call("/api/drm/tv/espn")).status, 404, "no license route for HLS channels");
+  assert.equal((await call("/api/drm/tv/sportzfy-keyless")).status, 404, "no license route for keyless channels");
+  assert.equal((await call("/api/drm/tv/does-not-exist")).status, 404, "no license route for unknown ids");
+
+  // The play route proxies the manifest through the sealed /b/ route, whose
+  // rewrite keeps relative segment templates same-origin. proxyStream reads
+  // the manifest upstream first, so answer as a DASH manifest.
+  routes["https://dash.example/nova/playlist_cenc.mpd"] = {
+    ok: true,
+    status: 200,
+    url: "https://dash.example/nova/playlist_cenc.mpd",
+    headers: { get: (name) => (name.toLowerCase() === "content-type" ? "application/dash+xml" : null) },
+    body: { cancel: async () => {} },
+    text: async () => "<MPD/>"
+  };
+  const play = await call("/api/play/tv/sportzfy-nova-sports");
+  assert.match(
+    play.headers["Location"],
+    /^\/api\/play\/tv\/sportzfy-nova-sports\/b\/[A-Za-z0-9_-]+\/playlist_cenc\.mpd$/,
+    "ClearKey DASH plays from the /b/ manifest proxy"
+  );
+
+  // The app playlist carries type=dash plus its own license route URL.
+  const m3u = await (await call("/api/tv/playlist.m3u")).text();
+  assert.match(m3u, new RegExp(
+    '#EXTINF:-1 tvg-name="Nova Sports"[^\\n]* type="dash" drm="https://worker\\.test/api/drm/tv/sportzfy-nova-sports",Nova Sports\\n' +
+    "https://dash.example/nova/playlist_cenc.mpd"
+  ), "the app playlist wires the license route to its channel");
+}
+ok("ClearKey DASH channels proxy, license and travel through playlist and list");
+
+// The key survives a snapshot outage (the carry-over keeps the license with
+// the channel it was captured for).
+{
+  routes[MAIN_PLAYLIST_URL] = reply(200, channelsJs([
+    { name: "ESPN", logo: "", url: "https://tv.example/espn" }
+  ]));
+  routes[SNAPSHOT_URL] = new Error("origin down");
+  await admin("/api/admin/tv/sync", "POST");
+  const license = await (await call("/api/drm/tv/sportzfy-nova-sports")).json();
+  assert.ok(license.keys?.[0]?.kid, "the carried-over channel still serves its key");
+}
+ok("a carried-over ClearKey channel keeps serving its license");
+
 console.log("\nsportzfy-sync smoke: " + passed + " passed");

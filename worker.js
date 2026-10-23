@@ -1859,7 +1859,8 @@ function parseM3u(text) {
         name: (start > 0 ? line.slice(start) : "").trim() || attr("tvg-name"),
         logo: attr("tvg-logo"),
         category: group,
-        group
+        group,
+        clearkey: attr("clearkey")
       };
       continue;
     }
@@ -1910,6 +1911,7 @@ function parsePlaylist(raw) {
       referer: entry?.referer ?? entry?.referrer,
       origin: entry?.origin
     },
+    clearkey: entry?.clearkey,
     sandbox: entry?.sandbox
   }));
 }
@@ -1920,6 +1922,21 @@ function parsePlaylist(raw) {
 // unsandboxed, because some channels render a black frame inside a sandbox.
 function sandboxFlag(value) {
   return value === true || (typeof value === "string" && value.trim().toLowerCase() === "true");
+}
+
+/*
+ * ClearKey for DRM'd DASH channels. A playlist entry can carry a ClearKey
+ * key pair as `KID:KEY` (two 32-hex-char halves) — an #EXTINF `clearkey`
+ * attribute, a `clearkey` field in a JSON list, or the admin form. The pair
+ * matches the manifest's `cenc:default_KID`, and every player that reads it
+ * (dash.js protectionData on the site, the Android ClearKey CDM through the
+ * /api/drm/tv/:id license route) decrypts the stream without a license
+ * server. Nothing else in the pipeline needs to know how the key got there.
+ */
+const CLEARKEY_SHAPE = /^[0-9a-f]{32}:[0-9a-f]{32}$/;
+function cleanClearKey(value) {
+  const text = String(value ?? "").trim().replace(/\s+/g, "").toLowerCase();
+  return CLEARKEY_SHAPE.test(text) ? text : null;
 }
 
 /*
@@ -2112,6 +2129,7 @@ function cleanPlaylistEntries(entries, options = {}) {
     }
     seen.add(url);
     const headers = cleanStreamHeaders(piped.headers, entry?.headers);
+    const clearkey = cleanClearKey(entry?.clearkey);
     out.push({
       name,
       group: cleanGroup(entry?.group),
@@ -2119,6 +2137,7 @@ function cleanPlaylistEntries(entries, options = {}) {
       url,
       category: channelCategory(entry?.category, name, options.defaultCategory),
       sandbox: sandboxFlag(entry?.sandbox),
+      ...(clearkey ? { clearkey } : {}),
       ...(headers ? { headers } : {})
     });
   }
@@ -2287,6 +2306,7 @@ async function syncTvChannels(env, tvSource, options = {}) {
       entries.push({
         name: channel.name, group: channel.group, logo: channel.logo, url: channel.url,
         category: channel.category, sandbox: channel.sandbox, headers: channel.headers || null,
+        clearkey: channel.clearkey || null,
         fromExtra: channel.extra, carry: true
       });
     }
@@ -2304,9 +2324,10 @@ async function syncTvChannels(env, tvSource, options = {}) {
     taken.add(id);
     const category = previous?.categoryLocked ? previous.category : entry.category;
     const headers = entry.headers || null;
+    const clearkey = cleanClearKey(entry.clearkey) || null;
     const changed = !previous || previous.name !== entry.name || String(previous.group ?? "") !== entry.group ||
       previous.url !== entry.url || previous.logo !== entry.logo || previous.category !== category ||
-      Boolean(previous.sandbox) !== entry.sandbox ||
+      Boolean(previous.sandbox) !== entry.sandbox || (previous.clearkey || null) !== clearkey ||
       JSON.stringify(previous.headers || null) !== JSON.stringify(headers);
     if (!previous) added++;
     else if (changed) updated++;
@@ -2319,6 +2340,7 @@ async function syncTvChannels(env, tvSource, options = {}) {
       url: entry.url,
       ...(headers ? { headers } : {}),
       category,
+      ...(clearkey ? { clearkey } : {}),
       ...(entry.fromExtra ? { extra: entry.fromExtra } : {}),
       categoryLocked: Boolean(previous?.categoryLocked),
       sandbox: entry.sandbox,
@@ -2689,8 +2711,15 @@ function tvPlaylistM3u(channels, origin) {
     if (!url) continue;
     const name = clean(channel.name);
     const logo = safeStreamUrl(channel.logo);
-    const type = tvLike ? ' type="hls"' : "";
-    lines.push('#EXTINF:-1 tvg-name="' + name + '" tvg-logo="' + logo + '" group-title="' + clean(channel.group) + '"' + type + "," + name);
+    // ClearKey DASH channels carry the license route the ClearKey CDM asks
+    // through (media3's HttpMediaDrmCallback): the key pair itself stays
+    // server-side, exactly like the stream URL. `type="dash"` keeps the
+    // player from classifying the route by extension.
+    const drm = channel.clearkey && streamKind(url) === "dash"
+      ? ' type="dash" drm="' + clean(origin + "/api/drm/tv/" + encodeURIComponent(String(channel.id))) + '"'
+      : "";
+    const attrs = tvLike ? ' type="hls"' : drm;
+    lines.push('#EXTINF:-1 tvg-name="' + name + '" tvg-logo="' + logo + '" group-title="' + clean(channel.group) + '"' + attrs + "," + name);
     lines.push(url);
   }
   return lines.join("\n") + "\n";
@@ -2730,6 +2759,14 @@ function publicChannel(channel) {
     category: TV_CATEGORIES.includes(channel.category) ? channel.category : channelCategory(channel.group, channel.name),
     group: String(channel.group ?? ""),
     kind,
+    // Root-relative path to the channel's ClearKey license (a `/s/`-style
+    // sealed URL would be better here, but the key record is public by
+    // design — the manifest it unlocks is broadcast openly). The site player
+    // and the Android app fetch it to build their clearkey configs; the
+    // public list never carries the key pair itself.
+    ...(kind === "dash" && channel.clearkey
+      ? { drm: "/api/drm/tv/" + encodeURIComponent(String(channel.id)) }
+      : {}),
     // "sandbox": true in the playlist (or an admin tick) sandboxes a channel's
     // page. Everything else loads directly, because some channels render a
     // black frame inside a sandbox.
@@ -2790,6 +2827,17 @@ function editableChannelFields(body, current = {}, options = {}) {
     }
   }
 
+  // ClearKey key pair for a DRM'd DASH manifest ("" clears it). Malformed
+  // input is an error rather than a silent reset — a typo here breaks
+  // playback without any visible symptom.
+  let clearkey;
+  if (has("clearkey")) {
+    clearkey = cleanClearKey(body.clearkey);
+    if (body.clearkey && !clearkey) throw new InputError("ClearKey must be a KID:KEY pair of 32 hex characters each");
+  } else {
+    clearkey = cleanClearKey(current.clearkey);
+  }
+
   return {
     name,
     group,
@@ -2799,6 +2847,7 @@ function editableChannelFields(body, current = {}, options = {}) {
     category,
     categoryLocked,
     sort,
+    clearkey,
     sandbox: has("sandbox") ? sandboxFlag(body.sandbox) : Boolean(current.sandbox),
     proxy: has("proxy") ? truthy(body.proxy) : current.proxy === true,
     active: has("active") ? body.active !== false && body.active !== "false" : current.active !== false
@@ -2872,6 +2921,10 @@ function needsProxy(channel) {
   if (/^http:/i.test(url)) return true;
   if (channel?.proxy === true) return true;
   if (cleanStreamHeaders(channel?.headers)) return true;
+  // A ClearKey DASH channel always plays through the Worker: the sealed /b/
+  // route rewrote the manifest so its relative segment templates resolve
+  // same-origin, and the player page fetches the key route by channel id.
+  if (channel?.clearkey && streamKind(url) === "dash") return true;
   const kind = streamKind(url);
   return kind === "ts" || kind === "flv";
 }
@@ -3672,6 +3725,35 @@ async function fetchChannelLogo(logo) {
   });
 }
 
+// A ClearKey license response the platform CDM reads directly (the Android
+// app points media3 at it; the site converts it to dash.js protectionData).
+// The key pair is public by design — it unlocks a broadcast stream the
+// original app carries in plain JSON — but it stays out of the public
+// channel list and out of any page HTML: only this route reveals it, bound
+// to one channel id, and only while the channel is active.
+function hexToB64Url(hex) {
+  const bytes = Uint8Array.from(String(hex).match(/.{2}/g).map(pair => parseInt(pair, 16)));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function serveChannelClearKey(env, id) {
+  const state = await readTvStateCached(env);
+  const channel = state?.channels.find(item => String(item.id) === id && item.active !== false);
+  const clearkey = cleanClearKey(channel?.clearkey);
+  if (!clearkey || streamKind(channel.url) !== "dash") return drmUnavailable();
+  const [kid, key] = clearkey.split(":");
+  return new Response(JSON.stringify({ keys: [{ kty: "oct", kid: hexToB64Url(kid), key: hexToB64Url(key) }] }), {
+    headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=300" }
+  });
+}
+
+function drmUnavailable() {
+  return new Response("no such channel key\n", {
+    status: 404,
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
+  });
+}
+
 async function serveChannelLogo(request, env, rawId, ctx) {
   // The edge cache is checked before anything touches KV.
   const cache = typeof caches !== "undefined" && caches && caches.default ? caches.default : null;
@@ -3773,6 +3855,13 @@ async function handlePublicTv(request, env, url, ctx) {
 
   const logo = url.pathname.match(/^\/api\/tv\/logo\/([^/]+)$/);
   if (request.method === "GET" && logo) return serveChannelLogo(request, env, logo[1], ctx);
+
+  const drm = url.pathname.match(/^\/api\/drm\/tv\/([^/]+)$/);
+  if (request.method === "GET" && drm) {
+    const id = safeDecode(drm[1]);
+    if (id === null) return drmUnavailable();
+    return serveChannelClearKey(env, id);
+  }
 
   if (request.method === "GET" || request.method === "HEAD") {
     const route = parsePlayRoute(url.pathname);

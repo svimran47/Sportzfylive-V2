@@ -184,6 +184,7 @@ function fakeDash(env) {
           on(name, fn) { (player.handlers[name] = player.handlers[name] || []).push(fn); },
           emit(name, data) { for (const fn of player.handlers[name] || []) fn(data); },
           initialize(media, url, autoPlay) { player.init = { media, url, autoPlay }; },
+          setProtectionData(data) { player.protectionData = data; },
           reset() { player.resetCalled = true; }
         };
         env.dashPlayers.push(player);
@@ -267,6 +268,7 @@ function boot(search, opts = {}) {
   };
   if (env.opts.mse) context.MediaSource = function MediaSource() {};
   if (env.opts.mms) context.ManagedMediaSource = function ManagedMediaSource() {};
+  if (env.opts.fetch) context.fetch = env.opts.fetch;
   context.window = context;
   env.context = context;
   env.video = video;
@@ -654,6 +656,38 @@ console.log("# other kinds");
   assert.ok(player.resetCalled, "dash.js reset on failure");
 }
 ok("type=dash -> dash.js MediaPlayer().create().initialize(video, url, true)");
+
+{
+  const fetchCalls = [];
+  const env = boot(query({ src: SRC, type: "dash", drm: "/api/drm/tv/clearkey-ch" }), {
+    fetch: (url) => {
+      fetchCalls.push(String(url));
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ keys: [{ kty: "oct", kid: "ESIzRFVmd4iZABEiM0RVZg", key: "S4ByTQ74a8ssIfeZnWdznQ" }] })
+      });
+    }
+  });
+  await env.tick(0);
+  const player = env.dashPlayers[0];
+  assert.equal(
+    JSON.stringify(player.protectionData),
+    JSON.stringify({ "com.w3.clearkey": { clearkeys: { ESIzRFVmd4iZABEiM0RVZg: "S4ByTQ74a8ssIfeZnWdznQ" } } }),
+    "the license response becomes ClearKey protectionData"
+  );
+  assert.deepEqual(player.init, { media: env.video, url: URL_FOR, autoPlay: true }, "initialize happens after the license fetch");
+  assert.deepEqual(fetchCalls, [ORIGIN + "/api/drm/tv/clearkey-ch"], "the license route is fetched same-origin");
+}
+ok("ClearKey dash: the drm route's license becomes dash.js protectionData before initialize");
+{
+  const env = boot(query({ src: SRC, type: "dash", drm: "/api/drm/tv/void" }), {
+    fetch: () => Promise.reject(new Error("no network"))
+  });
+  await env.tick(0);
+  assert.equal(env.dashPlayers[0].init.url, URL_FOR, "a dead license route still initializes");
+  assert.ok(!msgShown(env));
+}
+ok("a dead license route does not block initialization");
 
 for (const type of ["video", "audio"]) {
   const env = boot(query({ src: SRC, type }));
