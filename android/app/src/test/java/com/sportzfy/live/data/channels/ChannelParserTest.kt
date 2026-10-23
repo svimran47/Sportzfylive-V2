@@ -134,6 +134,44 @@ class ChannelParserTest {
     }
 
     @Test
+    fun `an M3U drm attribute becomes the ClearKey license URL, validated like any URL`() {
+        val raw = "#EXTM3U\n" +
+            "#EXTINF:-1 tvg-name=\"Nova\" type=\"dash\" drm=\"https://worker.example/api/drm/tv/nova\",Nova\n" +
+            "https://cdn.example/nova.mpd\n" +
+            "#EXTINF:-1 tvg-name=\"Relative\" drm=\"/api/drm/tv/relative\"\n" +
+            "https://cdn.example/relative.mpd\n" +
+            "#EXTINF:-1 tvg-name=\"Plain drm=\" drm=\"not a url\"\n" +
+            "https://cdn.example/plain.mpd\n" +
+            "#EXTINF:-1 tvg-name=\"Untagged\"\n" +
+            "https://cdn.example/untagged.mpd\n"
+        val channels = parse(raw)!!
+        assertEquals(
+            listOf(
+                "https://worker.example/api/drm/tv/nova",
+                null,
+                null,
+                null,
+            ),
+            channels.map { it.drmLicenseUrl },
+        )
+        assertEquals(
+            listOf(StreamFormat.DASH, StreamFormat.DASH, StreamFormat.DASH, null),
+            channels.map { it.streamFormat },
+        )
+    }
+
+    @Test
+    fun `a JSON drm field becomes the ClearKey license URL`() {
+        val raw = """[
+            {"name":"Aiv","url":"https://cdn.example/aiv.mpd","drm":"https://worker.example/api/drm/tv/aiv"},
+            {"name":"Broken","url":"https://cdn.example/broken.mpd","drm":"javascript:alert(1)"}
+        ]"""
+        val channels = parse(raw)!!
+        assertEquals("https://worker.example/api/drm/tv/aiv", channels[0].drmLicenseUrl)
+        assertNull(channels[1].drmLicenseUrl)
+    }
+
+    @Test
     fun `an M3U playlist with no entries is an empty list, not an error`() {
         assertEquals(emptyList<Any>(), parse("#EXTM3U\n"))
     }

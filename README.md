@@ -155,18 +155,31 @@ Basketball, Horse Racing, Sports, …) come from the name, with *Default
 category* (Settings → TV source) as the fallback.
 
 On top of the playlist source, `public/sportzfy-channels.m3u` — a checked-in
-snapshot of direct HLS channels captured from the original Sportzfy app's own
+snapshot of direct channels captured from the original Sportzfy app's own
 channel data (every URL verified HTTP 200 with a valid manifest at capture
-time) — merges into every sync behind the playlist: the playlist wins on URL
-collisions, and a re-sync prunes snapshot channels the snapshot dropped, while
-a snapshot that cannot be read carries its channels over until it answers
-again. Update the snapshot from a fresh runtime capture with
+time: plain HLS, plus DASH channels whose capture carries a ClearKey
+`KID:KEY` pair) — merges into every sync behind the playlist: the playlist
+wins on URL collisions, and a re-sync prunes snapshot channels the snapshot
+dropped, while a snapshot that cannot be read carries its channels over until
+it answers again. Update the snapshot from a fresh runtime capture with
 `node scripts/build-sportzfy-channels.mjs <sportzfy_tv_channels.json>`.
+
+**ClearKey DASH**: a snapshot `clearkey="KID:KEY"` attribute is stored on the
+channel and served by the `/api/drm/tv/:id` route as a standard ClearKey
+license response — the site player fetches it into dash.js `protectionData`
+(`com.w3.clearkey` → `clearkeys`), and the app's playlist points the
+platform's ClearKey CDM at the same route via a `drm` attribute. Those
+channels always play through the Worker's sealed `/b/` DASH proxy so the
+manifest's relative segment templates resolve same-origin. The public list
+names the route but never the key pair; the route only answers while the
+channel is active, and a malformed key never lands on a channel.
 
 The public channel list never contains stream URLs. Channels play through
 `/api/play/tv/:id`:
 
-- **https HLS/DASH/video/audio/embeds** redirect to the stream, as before.
+- **https HLS/DASH/video/audio/embeds** redirect to the stream, as before
+  (ClearKey DASH channels are the exception: they play through the sealed
+  `/b/` proxy, below).
 - **http streams, raw MPEG-TS/FLV, channels with request headers
   (`#EXTVLCOPT:http-user-agent`/`http-referrer`, Kodi `|User-Agent=…`) or the
   admin's *Play through the Worker* flag** are proxied by the Worker: the

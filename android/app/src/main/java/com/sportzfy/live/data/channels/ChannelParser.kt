@@ -27,6 +27,7 @@ internal data class ChannelDto(
     val sandbox: JsonElement? = null,
     val type: JsonElement? = null,
     val country: String? = null,
+    val drm: String? = null,
 )
 
 private fun JsonElement?.text(): String? = (this as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -44,6 +45,7 @@ private class RawChannel(
     val format: StreamFormat? = null,
     val country: String? = null,
     val sandboxed: Boolean = false,
+    val drm: String? = null,
 )
 
 /**
@@ -51,10 +53,11 @@ private class RawChannel(
  * (`const channels = [...];`), so the outermost JSON array is cut out of it
  * first; a plain JSON array works too. An M3U playlist (`#EXTM3U` with
  * `#EXTINF` entries, as IPTV providers publish) is read as well: the title,
- * `tvg-logo` and `group-title` (or `#EXTGRP`) of each entry, and a `type`
+ * `tvg-logo` and `group-title` (or `#EXTGRP`) of each entry, a `type`
  * attribute (`"hls"`…) when the entry names one — as the Worker's
  * `/api/tv/playlist.m3u` does for the short-link player pages it routes
- * through `/api/play/tv/:id`. The group is
+ * through `/api/play/tv/:id` — and a `drm` attribute for a ClearKey DASH
+ * channel's license route. The group is
  * read as the channel's country as well, which is how `sports.m3u` files them.
  *
  * Entries without a name or an http(s) stream URL are skipped, as are repeated
@@ -94,6 +97,7 @@ object ChannelParser {
                 format = StreamFormat.fromHint(dto.type.text()),
                 country = dto.country,
                 sandboxed = dto.sandbox.isTrue(),
+                drm = dto.drm,
             )
         }
     }
@@ -135,6 +139,9 @@ object ChannelParser {
                         // whose URL has no media extension, e.g. the play route
                         // for short-link channels.
                         format = StreamFormat.fromHint(attributes["type"]),
+                        // The Worker's playlist carries a ClearKey DASH
+                        // channel's license route here.
+                        drm = attributes["drm"],
                     )
                     info = null
                     group = null
@@ -176,6 +183,10 @@ object ChannelParser {
                 streamFormat = entry.format,
                 country = entry.country?.let(::decodeEntities)?.trim()?.takeIf { it.isNotEmpty() },
                 sandboxed = entry.sandboxed,
+                // The license route must be an http(s) URL; a root-relative
+                // string (which only makes sense on the Worker's own site)
+                // would break the app, so it is dropped instead.
+                drmLicenseUrl = entry.drm?.let(::decodeEntities)?.trim()?.takeIf { isHttpUrl(it) },
             )
         }
     }

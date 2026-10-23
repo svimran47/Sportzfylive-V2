@@ -84,6 +84,9 @@ video{display:block;width:100%;height:100%;background:#000}
   var type = String(params.get("type") || "hls").trim().toLowerCase();
   if (TYPES.indexOf(type) === -1) type = "auto";
   if (type === "hls" && /^\/api\/play\/embed\//.test(src)) type = "auto";
+  // Root-relative ClearKey license route for a DRM'd DASH channel (the
+  // public channel list carries it; it serves the key pair the CDM reads).
+  var drm = params.get("drm") || "";
 
   // When the frame came through the player page for an embed-resolved source,
   // fall back to the plain embed frame if the extracted media never plays —
@@ -532,7 +535,50 @@ video{display:block;width:100%;height:100%;background:#000}
       player.on(events.PLAYBACK_NOT_ALLOWED || "playbackNotAllowed", function () {
         if (token === session) blocked();
       });
-      player.initialize(video, url, true);
+      var initialize = function () {
+        player.initialize(video, url, true);
+      };
+      // ClearKey channels need their key pair handed to dash.js before
+      // initialize, as protectionData. The Worker's license route serves the
+      // standard response; without it (or when it 404s) playback starts
+      // anyway so the CDM's key error is the visible failure.
+      if (!drm) return initialize();
+      fetchClearKey(drm, function (protectionData) {
+        if (token !== session) return;
+        if (protectionData && typeof player.setProtectionData === "function") {
+          player.setProtectionData(protectionData);
+        }
+        initialize();
+      });
+    });
+  }
+
+  // Standard ClearKey license -> dash.js protectionData:
+  //   { keys: [{ kty: "oct", kid: <b64url>, key: <b64url> }] }
+  //   -> { "com.w3.clearkey": { clearkeys: { <kid b64url>: <key b64url> } } }
+  function fetchClearKey(drm, done) {
+    var request;
+    try {
+      request = new URL(drm, location.origin).href;
+    } catch (_) {
+      return done(null);
+    }
+    fetch(request).then(function (response) {
+      return response.ok ? response.json() : null;
+    }).then(function (license) {
+      var keys = license && (license.keys || (license["com.w3.clearkey"] && license["com.w3.clearkey"].keys)) || [];
+      var clearkeys = {};
+      for (var i = 0; i < keys.length; i++) {
+        var pair = keys[i] || {};
+        var kid = String(pair.kid || "");
+        var key = String(pair.k || pair.key || "");
+        if (pair.kty === "oct" && /^[A-Za-z0-9_-]+$/.test(kid) && /^[A-Za-z0-9_-]+$/.test(key)) {
+          clearkeys[kid] = key;
+        }
+      }
+      done(Object.keys(clearkeys).length ? { "com.w3.clearkey": { clearkeys: clearkeys } } : null);
+    }).catch(function () {
+      done(null);
     });
   }
 

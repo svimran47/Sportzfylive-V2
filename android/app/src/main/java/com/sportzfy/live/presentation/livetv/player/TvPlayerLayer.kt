@@ -214,6 +214,7 @@ fun TvPlayerLayer(
                 state = playerState,
                 config = config,
                 textureSurface = true,
+                drmLicenseUrl = channel.drmLicenseUrl,
             )
             if (placement == Placement.MINI) {
                 MiniControls(

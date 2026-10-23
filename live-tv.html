@@ -476,8 +476,12 @@
       frame.src = PROXY_URL + path;
     } else {
       // Streams (HLS, MPEG-TS, DASH, FLV, video, audio) play in the
-      // first-party player page, which picks the engine from the type.
-      frame.src = PROXY_URL + "/player.html?src=" + encodeURIComponent(path) + (kind !== "hls" ? "&type=" + kind : "");
+      // first-party player page, which picks the engine from the type. A
+      // ClearKey DASH channel also carries its license route: the player
+      // fetches the key pair from the Worker before it initializes dash.js.
+      frame.src = PROXY_URL + "/player.html?src=" + encodeURIComponent(path) +
+        (kind !== "hls" ? "&type=" + kind : "") +
+        (kind === "dash" && channel.drm ? "&drm=" + encodeURIComponent(channel.drm) : "");
     }
     frame.allow = "autoplay; fullscreen; encrypted-media; picture-in-picture";
     frame.allowFullscreen = true;
