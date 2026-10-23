@@ -4,7 +4,7 @@
     "wrangler": "^4.136.0"
   },
   "scripts": {
-    "test": "node test/dom-ux.smoke.mjs && node test/ui-polish.smoke.mjs && node test/live-tv.smoke.mjs && node test/player.smoke.mjs && node test/resolver.smoke.mjs && node test/admin-tv.smoke.mjs && node test/stream-proxy.smoke.mjs && node test/tv-probe.smoke.mjs && node test/deploy.smoke.mjs",
+    "test": "node test/dom-ux.smoke.mjs && node test/ui-polish.smoke.mjs && node test/live-tv.smoke.mjs && node test/player.smoke.mjs && node test/resolver.smoke.mjs && node test/admin-tv.smoke.mjs && node test/stream-proxy.smoke.mjs && node test/tv-like.smoke.mjs && node test/tv-probe.smoke.mjs && node test/deploy.smoke.mjs",
     "deploy": "wrangler deploy",
     "serve": "node scripts/serve.mjs"
   },

@@ -48,6 +48,25 @@ const MAX_PLAYLIST_ENTRIES = 5000;
 const MAX_PLAYLIST_BYTES = 5 * 1024 * 1024;
 const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
+// The channels.json playlist serves most channels as short links that open a
+// throwaway player page on a rotating domain — a page that refuse to render
+// inside a frame (it wipes itself when it senses a sandboxed or anonymous
+// frame) and whose pop-unders spring the moment it can. The page's loader is
+// scripted, so the Worker replays it server-side: resolveTvLikeChannel below
+// decodes the loader, fetches the signed binary playlist it points at, XORs
+// it the same way, and the play route serves the real HLS playlist through
+// the sealed stream proxy. First-party playback for the Live TV page, the
+// same bypass the Streamed embeds got — without touching them or the player.
+const TV_LIKE_KEY_PREFIX = "tv_like:";            // tv/<id> lookup -> resolved playlist URL
+const TV_LIKE_RESOLVE_FRESH_MS = 3 * 60 * 1000;   // a resolved playlist URL is reused this long
+const TV_LIKE_RESOLVE_TTL_S = 12 * 60 * 60;       // KV record lifetime (same ceiling as embed_resolve)
+const TV_LIKE_TIMEOUT_MS = 9000;                  // whole-flight budget for one resolve
+const TV_LIKE_LIST_CAP = 256 * 1024;              // max bytes read of the encrypted playlist
+// The short-link shape: https://<rotating host>/<code>-<channel number> —
+// no extension, no query. A real playlist could carry a page like this too;
+// harmless, the resolver then just falls back to the old redirect.
+const TV_LIKE_PAGE_URL = /^https?:\/\/[^/?#"']+\/[A-Za-z0-9]{5,10}-\d{1,8}(?:\/)?$/;
+
 // Stream proxy: http streams (and any stream needing custom request headers)
 // are played through the Worker, so browsers never see the upstream URL or
 // the account login it carries. See "Stream proxy" below.
@@ -1891,6 +1910,174 @@ function sandboxFlag(value) {
   return value === true || (typeof value === "string" && value.trim().toLowerCase() === "true");
 }
 
+/*
+ * "TV-like" short-link player pages
+ *
+ * Most channels.json channels open on a throwaway player page: a rotating
+ * ad-funded host whose page wipes itself whenever it thinks it is framed
+ * (a sandbox attribute, a null referrer, a mismatching ancestor), and whose
+ * play links expire minutes after they are minted. Inside the Live TV iframe
+ * that reads as "channels never load".
+ *
+ * The page is however a deterministic wrapper: one script carries its loader
+ * as an encoded numeric array (base + offset re-randomised per request,
+ * variable names scrambled), which evaluates a `loadStreamUrl(tokenUrl)`
+ * stub; that stub fetches a binary blob at the token URL and XOR-decodes it
+ * into the real HLS playlist URL it hands to jwplayer. The Worker replays
+ * every step without a browser and re-serves the playlist it yields through
+ * the sealed stream proxy — no third-party frame is ever rendered, so the
+ * pop-ups and the self-wipe have nowhere to run.
+ *
+ * Resolution is best effort and never throws. A miss falls back to today's
+ * plain redirect to the page, so upstream layout changes degrade, never
+ * dead-end; a stale-but-recent resolution keeps serving while nothing new is
+ * found (same contract the Streamed embed resolver sets for its caches).
+ */
+
+function looksLikeTvLikeChannel(url) {
+  const value = String(url ?? "").split("|")[0].trim();
+  return streamKind(value) === "embed" && TV_LIKE_PAGE_URL.test(value);
+}
+
+// Decodes one encoded-evaluator script block into its JavaScript source.
+// Names are scrambled per request, so the fixed parts are matched: the
+// `fromCharCode(((arr[i] ^ BASE) - OFFSET + 256) % 256)` loop, the base and
+// offset constants and the `""` accumulator right before it, and the numeric
+// array those constants sit between.
+function decodeTvLikeLoaderBlock(block) {
+  const at = block.search(/String\.fromCharCode\(\(\(_\w+\[_\w+\]\^_\w+\)-\w+\+256\)%256\)/);
+  if (at < 0) return "";
+  const before = block.slice(0, at);
+  const keys = before.match(/,\s*_\w+\s*=\s*(\d{1,3})\s*,\s*_\w+\s*=\s*(\d{1,3})\s*,\s*_\w+\s*=\s*"\"\s*,\s*_\w+\s*;\s*for\s*\(\s*_\w+\s*=\s*0\s*;\s*_\w+\s*<\s*_\w+\.length\s*;\s*_\w+\+\+\)\s*\{\s*_\w+\s*\+=$/);
+  if (!keys) return "";
+  const close = before.lastIndexOf("]");
+  const open = before.lastIndexOf("[", close);
+  if (open < 0 || close <= open || close - open > 50000) return "";
+  const bytes = block.slice(open + 1, close).split(",").map(Number).filter(Number.isFinite);
+  if (!bytes.length || bytes.length > 20000) return "";
+  const base = Number(keys[1]);
+  const offset = Number(keys[2]);
+  let source = "";
+  for (const byte of bytes) source += String.fromCharCode(((byte ^ base) - offset + 256) % 256);
+  return source;
+}
+
+// Finds the encoded loader inside the page (one script block whose decode
+// yields the loadStreamUrl stub) and returns the decoded source, or "".
+function decodeTvLikeLoader(pageText) {
+  for (const block of String(pageText ?? "").matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)) {
+    const body = block[1];
+    if (!body || body.length > 100000 || !/\[\d{2,3},\d{2,3}[\d,]*\]/.test(body)) continue;
+    const source = decodeTvLikeLoaderBlock(body);
+    if (source && /loadStreamUrl\s*\(/.test(source)) return source;
+  }
+  return "";
+}
+
+// The tokenized list URL the loader fetches; the token part of its path
+// doubles as one of the two XOR keys.
+function tvLikeTokenUrl(loaderSource) {
+  const match = String(loaderSource ?? "").match(/loadStreamUrl\s*\(\s*[`"']([^`"']{8,2000})[`"']/);
+  const token = match ? safeStreamUrl(match[1]) : "";
+  return token;
+}
+
+// The page loader's own decryption: byte 0 seeds the chain and is dropped;
+// byte i XORs with token[i-1 mod len] and the counter rebuilt from the seed.
+function decodeTvLikeList(bytes, token) {
+  if (!bytes || !bytes.length || !token) return "";
+  let text = "";
+  const seed = bytes[0];
+  for (let i = 1; i < bytes.length; i++) {
+    text += String.fromCharCode(bytes[i] ^ token.charCodeAt((i - 1) % token.length) ^ ((seed + i - 1) & 255));
+  }
+  return text.trim();
+}
+
+async function readTvLikeCache(env, scope) {
+  const db = env.SPORTZFY_DB;
+  if (!db || typeof db.get !== "function") return null;
+  try {
+    const record = await db.get(TV_LIKE_KEY_PREFIX + scope, "json");
+    return record && typeof record === "object" && typeof record.u === "string" ? record : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function writeTvLikeCache(env, scope, record) {
+  const db = env.SPORTZFY_DB;
+  if (!db || typeof db.put !== "function") return;
+  try {
+    await db.put(TV_LIKE_KEY_PREFIX + scope, JSON.stringify(record), { expirationTtl: TV_LIKE_RESOLVE_TTL_S });
+  } catch (_) {}
+}
+
+async function fetchTvLikeList(url, headers) {
+  try {
+    const response = await fetchWithTimeout(
+      url,
+      { redirect: "follow", headers: { "User-Agent": CHROME_UA, "Accept": "*/*", ...headers } },
+      TV_LIKE_TIMEOUT_MS
+    );
+    if (!response.ok) {
+      discardBody(response);
+      return null;
+    }
+    const bytes = await readCapped(response.body, TV_LIKE_LIST_CAP);
+    return bytes && bytes.length ? bytes : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Resolves one channel's short-link page into its real playlist:
+// { url, headers } on success, null (or the last good answer) never throws.
+// Cached under the play scope ("tv/<id>", the key stream-sealing already
+// scopes by) with the channel URL stamped in, so a re-sync that changes the
+// URL drops the record and the probe cron below warms the same key.
+async function resolveTvLikeChannel(env, scope, channelUrl) {
+  const source = safeStreamUrl(channelUrl);
+  if (!source || !looksLikeTvLikeChannel(source)) return null;
+  const fresh = await readTvLikeCache(env, scope);
+  if (fresh && fresh.src === source && Date.now() - (Number(fresh.found) || 0) < TV_LIKE_RESOLVE_FRESH_MS) {
+    return { url: fresh.u, headers: cleanStreamHeaders(fresh.h) || null };
+  }
+
+  let page = null;
+  try {
+    page = await fetchEmbedPage(source);
+  } catch (_) {
+    page = null;
+  }
+  if (page) {
+    const loaderSource = decodeTvLikeLoader(page.text);
+    const tokenUrl = tvLikeTokenUrl(loaderSource);
+    const token = tokenUrl.slice(tokenUrl.lastIndexOf("/") + 1);
+    let referer = "";
+    try { referer = new URL(page.finalUrl).origin + "/"; } catch (_) {}
+    const bytes = tokenUrl ? await fetchTvLikeList(tokenUrl, { ...(referer ? { "Referer": referer } : {}) }) : null;
+    const playlist = bytes ? decodeTvLikeList(bytes, token) : "";
+    const resolved = safeStreamUrl(playlist.split(/\s+/)[0] || "");
+    // Only a genuine media URL counts; an HTML answer (changed layout,
+    // bot wall) is not cached either — the redirect fallback stays the truth.
+    if (resolved && streamKind(resolved) !== "embed" &&
+        await mediaPlayable(resolved, page.finalUrl, page.type)) {
+      // The playlist (and its segments, through the sealed tokens) presents
+      // itself the way the page's player does: the page's origin as referer
+      // and a Chrome user agent.
+      const headers = cleanStreamHeaders({ referer, userAgent: CHROME_UA }) || null;
+      const record = { u: resolved, h: headers, src: source, found: Date.now() };
+      await writeTvLikeCache(env, scope, record);
+      return { url: record.u, headers: cleanStreamHeaders(record.h) || null };
+    }
+  }
+
+  // Nothing new: keep the previous answer while it exists.
+  if (fresh && fresh.src === source) return { url: fresh.u, headers: cleanStreamHeaders(fresh.h) || null };
+  return null;
+}
+
 // Entries without a name or an http(s) stream URL are skipped, as are
 // repeated stream URLs. `genre` is ignored on purpose: upstream marks every
 // channel (cartoons included) "Sports", so categories come from `category`
@@ -2281,14 +2468,25 @@ function probeHeaders(stored) {
 }
 
 // Returns { ok, reason, ms, kind }. Never throws.
-export async function probeChannel(channel) {
+export async function probeChannel(channel, env = null) {
   const started = Date.now();
   const kind = streamKind(channel.url);
   const url = safeStreamUrl(channel.url);
   const headers = probeHeaders(channel.headers);
   try {
     if (!url) throw new ProbeError("not an http(s) URL");
-    if (kind === "embed") throw new ProbeError("web page: playback can't be verified");
+    if (kind === "embed") {
+      // Short-link player pages resolve like they do at play time
+      // (resolveTvLikeChannel): the probe verifies the playlist they hide
+      // and warms the same KV record the play route serves from.
+      if (env && looksLikeTvLikeChannel(channel.url)) {
+        const body = await resolveTvLikeChannel(env, "tv/" + channel.id, channel.url);
+        if (!body) throw new ProbeError("page did not resolve");
+        await verifyHls(body.url, probeHeaders(body.headers), 0);
+        return { ok: true, reason: "", ms: Date.now() - started, kind: "hls" };
+      }
+      throw new ProbeError("web page: playback can't be verified");
+    }
     if (kind === "hls") await verifyHls(url, headers);
     else if (kind === "dash") await verifyDash(url, headers);
     else await verifyProgressive(url, headers, kind);
@@ -2356,7 +2554,7 @@ export async function runTvProbe(env) {
   await Promise.all(Array.from({ length: Math.min(TV_PROBE_CONCURRENCY, batch.length) }, async () => {
     while (next < batch.length) {
       const index = next++;
-      results[index] = await probeChannel(batch[index].channel);
+      results[index] = await probeChannel(batch[index].channel, env);
     }
   }));
 
@@ -2457,13 +2655,18 @@ function channelLogoSrc(channel) {
 }
 
 function publicChannel(channel) {
+  // Short-link player pages resolve to a real playlist at play time
+  // (resolveTvLikeChannel), so they route to the first-party player like the
+  // HLS streams they hide — the page never frames the ad host.
+  const rawKind = streamKind(channel.url);
+  const kind = rawKind === "embed" && looksLikeTvLikeChannel(channel.url) ? "hls" : rawKind;
   return {
     id: String(channel.id),
     name: String(channel.name ?? ""),
     logo: channelLogoSrc(channel),
     category: TV_CATEGORIES.includes(channel.category) ? channel.category : channelCategory(channel.group, channel.name),
     group: String(channel.group ?? ""),
-    kind: streamKind(channel.url),
+    kind,
     // "sandbox": true in the playlist (or an admin tick) sandboxes a channel's
     // page. Everything else loads directly, because some channels render a
     // black frame inside a sandbox.
@@ -3080,7 +3283,24 @@ async function servePlayRoute(request, env, url, route) {
   }
   const target = source ? safeStreamUrl(source.url) : "";
   if (!target) return playUnavailable();
-  if (!needsProxy(source)) return redirectTo(target);
+  if (!needsProxy(source)) {
+    // Short-link player pages from the channels.json playlist resolve to
+    // their real playlist server-side (see resolveTvLikeChannel): the Live
+    // TV player never renders the ad page. Any other channel — and anything
+    // the resolver could not dig out — keeps the plain redirect.
+    if (looksLikeTvLikeChannel(target)) {
+      const resolved = await resolveTvLikeChannel(env, route.scope, target);
+      if (resolved) {
+        return proxyStream(request, env, {
+          ...route,
+          target: resolved.url,
+          headers: resolved.headers || source.headers,
+          kind: "hls"
+        });
+      }
+    }
+    return redirectTo(target);
+  }
 
   // ?format=hls (iPhones without MSE): Xtream serves every live channel as
   // HLS too, at the same path with .m3u8 instead of .ts.
