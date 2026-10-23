@@ -79,6 +79,27 @@ const TV_LIKE_LIST_CAP = 256 * 1024;              // max bytes read of the encry
 // harmless, the resolver then just falls back to the old redirect.
 const TV_LIKE_PAGE_URL = /^https?:\/\/[^/?#"']+\/[A-Za-z0-9]{5,10}-\d{1,8}(?:\/)?$/;
 
+/*
+ * WideIPTV player pages
+ *
+ * Another player-page family, behind the TSN / DAZN / Willow-cricket feeds:
+ * wideiptv.top/player/<slug> renders a plain <title>d HTML page whose body
+ * carries exactly one auto-refreshing playlist link
+ * (https://ds169.bluetier.top/<slug>/index.m3u8?token=<base64|expiry>.<sig>).
+ * The minted token (`<slug>|no_check_ip|<expiry>`, expiry ≈ mint + 5 min)
+ * has a fixed secret the Worker cannot — and must not — recompute, but it
+ * also carries none of the usual hooks: no request headers bind it, so the
+ * playlist plays from anywhere. The page again refuses useful frames, so
+ * the Worker mints and re-mints server-side at play time (resolveWideIptvChannel)
+ * and streams through the sealed proxy like every other family.
+ */
+const WIDEIPTV_PAGE_HOST = "wideiptv.top";
+const WIDEIPTV_PAGE_URL = /^https?:\/\/(?:www\.)?wideiptv\.top\/player\/[A-Za-z0-9_-]+(?:\/|\?.*)?$/i;
+// A minted link is only used while its inner expiry says it has room left.
+const WIDEIPTV_MIN_TOKEN_WINDOW_MS = 20 * 1000;    // refill when the mint outruns the window by this much
+const WIDEIPTV_RESOLVE_FRESH_MS = 20 * 1000;       // per-key mint replays within this window share the record
+
+
 // Stream proxy: http streams (and any stream needing custom request headers)
 // are played through the Worker, so browsers never see the upstream URL or
 // the account login it carries. See "Stream proxy" below.
@@ -1968,6 +1989,12 @@ function looksLikeTvLikeChannel(url) {
   return streamKind(value) === "embed" && TV_LIKE_PAGE_URL.test(value);
 }
 
+// WideIPTV channel pages: /player/<slug> on wideiptv.top.
+function looksLikeWideIptvChannel(url) {
+  const value = String(url ?? "").split("|")[0].trim();
+  return streamKind(value) === "embed" && WIDEIPTV_PAGE_URL.test(value);
+}
+
 // Decodes one encoded-evaluator script block into its JavaScript source.
 // Names are scrambled per request, so the fixed parts are matched: the
 // `fromCharCode(((arr[i] ^ BASE) - OFFSET + 256) % 256)` loop, the base and
@@ -2104,6 +2131,87 @@ async function resolveTvLikeChannel(env, scope, channelUrl) {
 
   // Nothing new: keep the previous answer while it exists.
   if (fresh && fresh.src === source) return { url: fresh.u, headers: cleanStreamHeaders(fresh.h) || null };
+  return null;
+}
+
+// The minted playlist link a WideIPTV page carries. Pages escape URLs as
+// JSON-ish text (\/), so slashes are normalised before matching.
+function wideIptvPlaylistUrl(pageText) {
+  const text = String(pageText ?? "").replace(/\\\//g, "/");
+  const match = text.match(/https?:\/\/[^\s"'<>\\]*\/[^\s"'<>\\]*\.m3u8\?token=[^\s"'<>\\*]{20,2000}/i);
+  return match ? safeStreamUrl(match[0]) : "";
+}
+
+// The expiry the minted token itself carries: token=<base64>.<sig> where the
+// base64 part is "<slug>|<mode>|<epoch seconds>". 0 when the page moved to a
+// different shape — the answer is then validated by probing instead.
+function wideIptvTokenExpirySeconds(playlistUrl) {
+  const match = String(playlistUrl ?? "").match(/token=([A-Za-z0-9+/=_-]+)\./);
+  if (!match) return 0;
+  try {
+    const decoded = atob(decodeURIComponent(match[1]));
+    const parts = decoded.split("|");
+    const seconds = Number(parts[parts.length - 1]);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+// Resolves one WideIPTV channel page into its live playlist:
+// { url, headers: null } or null. Never throws.
+//
+// Minted tokens live about 5 minutes and the page may answer from an edge
+// cache whose mint is already spent, so the answer is minted at play time
+// and verified before it is served: a mint the token says is nearly spent
+// (or one that fails the probe) is refreshed once with a cache-busting page
+// fetch. Records are shared per channel for 20 seconds so a burst of plays
+// (and the probe cron) does not stampede the page.
+async function resolveWideIptvChannel(env, scope, channelUrl) {
+  const source = safeStreamUrl(channelUrl);
+  if (!source || !looksLikeWideIptvChannel(source)) return null;
+
+  const cached = await readTvLikeCache(env, scope);
+  if (cached && cached.src === source && Date.now() - (Number(cached.found) || 0) < WIDEIPTV_RESOLVE_FRESH_MS) {
+    return { url: cached.u, headers: null, expiresAt: Number(cached.expiresAt) || Date.now() + WIDEIPTV_MIN_TOKEN_WINDOW_MS };
+  }
+
+  const mint = async (bust) => {
+    let page = null;
+    try {
+      page = await fetchEmbedPage(bust ? source + (source.includes("?") ? "&" : "?") + "cb=" + Date.now() : source);
+    } catch (_) {
+      page = null;
+    }
+    return page ? wideIptvPlaylistUrl(page.text) : "";
+  };
+
+  let playlistUrl = await mint(false);
+  if (playlistUrl) {
+    const expiry = wideIptvTokenExpirySeconds(playlistUrl);
+    if (expiry && expiry * 1000 - Date.now() < WIDEIPTV_MIN_TOKEN_WINDOW_MS) playlistUrl = "";  // spent: mint again
+  }
+  if (!playlistUrl) playlistUrl = await mint(true);
+  const headers = null;   // bluetier mints bind nothing: no referer, no cookie, no IP
+  const expiry = wideIptvTokenExpirySeconds(playlistUrl);
+  if (playlistUrl && streamKind(playlistUrl) === "hls" &&
+      await mediaPlayable(playlistUrl, source, "text/html")) {
+    const now = Date.now();
+    const expiresAt = Math.round((expiry ? expiry * 1000 : now + WIDEIPTV_MIN_TOKEN_WINDOW_MS) || now + WIDEIPTV_MIN_TOKEN_WINDOW_MS);
+    await writeTvLikeCache(env, scope, {
+      u: playlistUrl,
+      h: headers,
+      src: source,
+      found: now,
+      expiresAt
+    });
+    return { url: playlistUrl, headers: null, expiresAt };
+  }
+
+  // The page (or an edge cache of it) would not mint a live token. Nothing
+  // older exists worth serving — WideIPTV records are only answered while
+  // fresh — so playback just falls back: a plain play redirects to the page,
+  // a sealed playlist poll answers 502 and the next poll mints again.
   return null;
 }
 
@@ -2562,6 +2670,14 @@ export async function probeChannel(channel, env = null) {
         await verifyHls(body.url, probeHeaders(body.headers), 0);
         return { ok: true, reason: "", ms: Date.now() - started, kind: "hls" };
       }
+      // WideIPTV player pages mint their playlist the same way at play time;
+      // the probe answers the same question the play route would.
+      if (env && looksLikeWideIptvChannel(channel.url)) {
+        const body = await resolveWideIptvChannel(env, "tv/" + channel.id, channel.url);
+        if (!body) throw new ProbeError("page did not resolve");
+        await verifyHls(body.url, probeHeaders(body.headers), 0);
+        return { ok: true, reason: "", ms: Date.now() - started, kind: "hls" };
+      }
       throw new ProbeError("web page: playback can't be verified");
     }
     if (kind === "hls") await verifyHls(url, headers);
@@ -2700,13 +2816,14 @@ function tvPlaylistM3u(channels, origin) {
   const lines = ["#EXTM3U"];
   for (const channel of channels) {
     if (channel.headers && Object.keys(channel.headers).length) continue;
-    // Short-link player pages don't work as media (nor as a page the app can
-    // render), so the playlist hands the app the Worker's play route instead:
-    // it resolves the page server-side to the real playlist (resolveTvLikeChannel)
-    // and streams it sealed. `type="hls"` marks the entry for players that
+    // Player pages that the Worker resolves server-side don't work as media
+    // (nor as a page the app can render), so the playlist hands the app the
+    // Worker's play route instead: it resolves the page server-side to the
+    // real playlist (resolveTvLikeChannel / resolveWideIptvChannel) and
+    // streams it sealed. `type="hls"` marks the entry for players that
     // classify by extension — the route has no media extension. Every other
     // channel keeps its catalog URL, exactly as before.
-    const tvLike = looksLikeTvLikeChannel(channel.url);
+    const tvLike = looksLikeTvLikeChannel(channel.url) || looksLikeWideIptvChannel(channel.url);
     const url = tvLike ? origin + "/api/play/tv/" + encodeURIComponent(String(channel.id)) : safeStreamUrl(channel.url);
     if (!url) continue;
     const name = clean(channel.name);
@@ -2747,11 +2864,13 @@ function channelLogoSrc(channel) {
 }
 
 function publicChannel(channel) {
-  // Short-link player pages resolve to a real playlist at play time
-  // (resolveTvLikeChannel), so they route to the first-party player like the
-  // HLS streams they hide — the page never frames the ad host.
+  // Player pages resolve to a real playlist at play time
+  // (resolveTvLikeChannel / resolveWideIptvChannel), so they route to the
+  // first-party player like the HLS streams they hide — the page never
+  // frames the ad host.
   const rawKind = streamKind(channel.url);
-  const kind = rawKind === "embed" && looksLikeTvLikeChannel(channel.url) ? "hls" : rawKind;
+  const resolvable = looksLikeTvLikeChannel(channel.url) || looksLikeWideIptvChannel(channel.url);
+  const kind = rawKind === "embed" && resolvable ? "hls" : rawKind;
   return {
     id: String(channel.id),
     name: String(channel.name ?? ""),
@@ -2982,11 +3101,21 @@ function fromBase64Url(text) {
 
 // Returns seal(url) -> token for one scope ("tv/<id>" or
 // "stream/<matchId>/<streamId>"); the scope is the AES-GCM additional data.
-async function streamSealer(env, scope, headers) {
+// `mint`/`mintExpiry` describe a short-lived tokenized playlist the sealed
+// URL came from (the WideIPTV family): every /s/ record that carries the
+// family's sub-playlists and segments also carries the channel page it was
+// minted from, so the /s/ route can mint a fresh playlist mid-session when
+// the sealed record runs past its expiry.
+async function streamSealer(env, scope, headers, mint = "", mintExpiry = 0) {
   const key = await streamKey(await streamProxySecret(env));
   const additionalData = textEncoder.encode(scope);
   return async (url) => {
-    const payload = { u: url, e: Date.now() + STREAM_TOKEN_TTL_MS, ...(headers ? { h: headers } : {}) };
+    const payload = {
+      u: url,
+      e: Date.now() + STREAM_TOKEN_TTL_MS,
+      ...(headers ? { h: headers } : {}),
+      ...(mint ? { m: mint, x: mintExpiry } : {})
+    };
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const sealed = new Uint8Array(await crypto.subtle.encrypt(
       { name: "AES-GCM", iv, additionalData },
@@ -3000,7 +3129,9 @@ async function streamSealer(env, scope, headers) {
   };
 }
 
-// { url, headers } for a valid, unexpired token of this scope, else null.
+// { url, headers, mint, mintExpiry } for a valid, unexpired token of this
+// scope, else null. `mint`/`mintExpiry` describe a WideIPTV playlist mint the
+// sealed URL borrowed (see streamSealer); empty/0 otherwise.
 async function openStreamToken(env, scope, token) {
   if (!token || token.length > 8192 || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
   try {
@@ -3015,7 +3146,9 @@ async function openStreamToken(env, scope, token) {
     const data = JSON.parse(new TextDecoder().decode(plain));
     if (!data || typeof data !== "object" || !(Number(data.e) > Date.now())) return null;
     const url = safeStreamUrl(data.u);
-    return url ? { url, headers: cleanStreamHeaders(data.h) } : null;
+    if (!url) return null;
+    const mint = safeStreamUrl(data.m) || "";
+    return { url, headers: cleanStreamHeaders(data.h), mint, mintExpiry: mint ? Number(data.x) || 0 : 0 };
   } catch (_) {
     return null;
   }
@@ -3221,7 +3354,7 @@ async function proxyStream(request, env, route) {
   const isDash = !isHlsType && (/dash\+xml/.test(type) || ((genericType || /xml/.test(type)) && /\.mpd$/i.test(finalPath)));
   const isHls = !isDash && (isHlsType || (genericType && /\.m3u8?$/i.test(finalPath)));
   const maybeHls = !isHls && !isDash && kind === "hls" && genericType;
-  const seal = (isHls || isDash || maybeHls) ? await streamSealer(env, route.scope, route.headers) : null;
+  const seal = (isHls || isDash || maybeHls) ? await streamSealer(env, route.scope, route.headers, route.mintFrom || "", route.mintExpiry || 0) : null;
 
   if (isDash) {
     if (route.via !== "b") {
@@ -3378,6 +3511,29 @@ async function servePlayRoute(request, env, url, route) {
       if (resolved.origin !== new URL(target).origin) return playUnavailable();
       target = safeStreamUrl(resolved.href);
       if (!target) return playUnavailable();
+    } else {
+      // WideIPTV playlists are short mints (≈5 min): a mid-session playlist
+      // poll must mint again instead of serving a spent link. When the mint
+      // still has room, the sealed URL answers as it is; when it is spent, a
+      // fresh playlist is minted through the sealed channel page and the
+      // old URL's path is kept with the new mint's query — the family's
+      // token authorizes any path on its host, so sub-playlists refresh.
+      // Segments carry the same mint and are consumed within its window, so
+      // segment fetches never trigger a page fetch of their own.
+      if (opened.mint && looksLikeWideIptvChannel(opened.mint) &&
+          Date.now() + WIDEIPTV_MIN_TOKEN_WINDOW_MS >= opened.mintExpiry) {
+        const resolved = await resolveWideIptvChannel(env, route.scope, opened.mint);
+        if (!resolved) return streamFailed();
+        try {
+          const old = new URL(opened.url);
+          const minted = new URL(resolved.url);
+          target = old.origin + old.pathname + minted.search;
+        } catch (_) {
+          return streamFailed();
+        }
+        route.mintFrom = opened.mint;
+        route.mintExpiry = resolved.expiresAt;
+      }
     }
     return proxyStream(request, env, { ...route, target, headers: opened.headers, kind: streamKind(target) });
   }
@@ -3402,8 +3558,25 @@ async function servePlayRoute(request, env, url, route) {
   if (!needsProxy(source)) {
     // Short-link player pages from the channels.json playlist resolve to
     // their real playlist server-side (see resolveTvLikeChannel): the Live
-    // TV player never renders the ad page. Any other channel — and anything
-    // the resolver could not dig out — keeps the plain redirect.
+    // TV player never renders the ad page. WideIPTV player pages (the TSN /
+    // DAZN / Willow-cricket feeds) resolve likewise, minting a fresh playlist
+    // token per play (resolveWideIptvChannel). Any other channel — and
+    // anything a resolver could not dig out — keeps the plain redirect.
+    if (looksLikeWideIptvChannel(target)) {
+      const resolved = await resolveWideIptvChannel(env, route.scope, target);
+      if (resolved) {
+        return proxyStream(request, env, {
+          ...route,
+          target: resolved.url,
+          headers: resolved.headers || source.headers,
+          kind: "hls",
+          // every /s/ this playlist spawns must be able to mint again when
+          // its token is spent: the sealer embeds the minted records
+          mintFrom: target,
+          mintExpiry: resolved.expiresAt
+        });
+      }
+    }
     if (looksLikeTvLikeChannel(target)) {
       const resolved = await resolveTvLikeChannel(env, route.scope, target);
       if (resolved) {

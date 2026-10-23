@@ -1,5 +1,8 @@
 // Functional smoke test for the Live TV short-link page resolver
-// (resolveTvLikeChannel + its play-route and probe integrations in worker.js).
+// (resolveTvLikeChannel + its play-route and probe integrations in worker.js)
+// and for the second page family it now covers: WideIPTV player pages
+// (resolveWideIptvChannel), whose minted playlist tokens the Worker mints
+// and re-mints server-side instead of framing the page.
 //
 // The channels.json catalog serves most channels as short links that open a
 // throwaway player page on a rotating domain — pages that refuse to render in
@@ -29,6 +32,24 @@ const SEGMENT_URL = "https://" + MEDIA_HOST + "/seg-0001.ts";
 const PLAIN_M3U = "https://media.example/live/alpha.m3u8";
 const PLAIN_PAGE = "https://player.example/watch";   // a plain embed page: not a short link
 
+// WideIPTV family: the pages carry exactly one minted playlist link whose
+// token is "<slug>|no_check_ip|<epoch seconds>." + hex signature. The mints
+// in the fixtures live far enough into the future for one play window, and
+// the "spent" fixture carries one minted in the past (an edge cache that
+// kept an old page alive).
+const WIDE_SLUG = "TSN2";
+const WIDE_PAGE = "https://wideiptv.top/player/" + WIDE_SLUG;
+const WIDE_BASE = "https://blue.example/" + WIDE_SLUG;
+const wideToken = (slug, epoch) => Buffer.from(slug + "|no_check_ip|" + epoch).toString("base64");
+const nowEpoch = () => Math.floor(Date.now() / 1000);
+const WIDE_PLAYLIST_LIVE = WIDE_BASE + "/index.m3u8?token=" + wideToken(WIDE_SLUG, nowEpoch() + 300) + ".a1b2c3d4";
+const WIDE_PLAYLIST_SPENT = WIDE_BASE + "/index.m3u8?token=" + wideToken(WIDE_SLUG, nowEpoch() - 60) + ".aa11bb22";
+const WIDE_VARIANT = WIDE_BASE + "/tracks-v1a1/mono.m3u8?token=" + wideToken(WIDE_SLUG, nowEpoch() + 300) + ".a1b2c3d4";
+const WIDE_MANIFEST = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=1280x720\n" +
+  WIDE_VARIANT.slice(WIDE_BASE.length + 1) + "\n";
+const WIDE_VARIANT_MANIFEST = "#EXTM3U\n#EXTINF:3.9,\nhttps://blue.example/TSN2/chunk-0001.ts\n";
+const WIDE_TS = "https://blue.example/TSN2/chunk-0001.ts";
+
 // Strings that must never reach a viewer.
 const SECRETS = [PAGE_HOST + "/", LIST_HOST + "/p/", LIST_HOST + "/main", "http" + "://" + PAGE_HOST];
 
@@ -38,13 +59,15 @@ const SECRETS = [PAGE_HOST + "/", LIST_HOST + "/p/", LIST_HOST + "/main", "http"
 
 const upstreamLog = [];
 let upstream = {};          // url -> (call) => Response
+const upstreamPrefix = [];  // [prefix, handler] — scratch URLs with mutable params (WideIPTV cache-busts)
 let missingUrls = new Set(); // transient holes (fallback paths)
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input);
   const call = { url, method: init.method || "GET", headers: new Headers(init.headers || {}) };
   upstreamLog.push(call);
   if (missingUrls.has(url)) throw new TypeError("fetch failed: " + url);
-  const handler = upstream[url] || upstream[url + "/"] && upstream[url + "/"] || null;
+  const handler = upstream[url] || (upstream[url + "/"] && upstream[url + "/"]) ||
+    upstreamPrefix.find(([prefix]) => url.startsWith(prefix))?.[1] || null;
   if (!handler) throw new TypeError("unexpected fetch: " + url);
   return handler(call);
 };
@@ -124,6 +147,15 @@ function loadStreamUrl(tUrl, ok, fail) { var x = new XMLHttpRequest(); get...; }
 });
 `;
 
+// A WideIPTV player page: title, one minted link (escaped like real pages).
+// The `cb` query marks the cache-bust fetch; the resolver re-mints through it
+// when the first page carries a spent link.
+const widePage = (playlistUrl) =>
+  "<!doctype html><html><head><title>" + WIDE_SLUG + " - </title></head><body>" +
+  '<div id="player"></div><script>var src = "' +
+  playlistUrl.replace(/\//g, "\\/") + '"; console.log(src, "");<\/script></body></html>';
+let wideFirstPage = WIDE_PLAYLIST_SPENT;    // the resolver's first look hits a spent mint
+
 // Rebuilds the encrypted binary list from the playlist URL it hides.
 function encryptedList(playlistUrl, seed) {
   const tokenPart = TOKEN_URL_A.slice(TOKEN_URL_A.lastIndexOf("/") + 1);
@@ -152,7 +184,8 @@ const UPSTREAM = [
   { name: "Alpha USA", logo: "https://img.example/alpha.png", genre: "Sports", url: PAGE_URL_A },
   { name: "Broken Beam", logo: "", genre: "Sports", url: PAGE_URL_B },
   { name: "Plain Page", logo: "", genre: "Sports", url: PLAIN_PAGE },
-  { name: "Plain HLS", logo: "", genre: "Sports", url: PLAIN_M3U }
+  { name: "Plain HLS", logo: "", genre: "Sports", url: PLAIN_M3U },
+  { name: "TSN 2", logo: "", genre: "Sports", url: WIDE_PAGE }
 ];
 const channelsJs = "const channels = " + JSON.stringify(UPSTREAM, null, 2) + ";\n";
 
@@ -164,6 +197,19 @@ upstream[TOKEN_URL_A] = () => respond(encryptedList(REAL_PLAYLIST_A, 7), { heade
 upstream[REAL_PLAYLIST_A] = () => respond(MANIFEST_A, { headers: { "Content-Type": "application/vnd.apple.mpegurl" } });
 upstream[SEGMENT_URL] = () => respond(TS_SEGMENT, { headers: { "Content-Type": "video/mp2t" } });
 upstream[PLAIN_M3U] = () => respond("#EXTM3U\n#EXTINF:4,\nhttps://media.example/live/alpha-seg.ts\n", { headers: { "Content-Type": "application/vnd.apple.mpegurl" } });
+// WideIPTV upstream: the page's plain fetch returns a spent mint from an
+// edge cache; the cache-busted fetch mints a live one. The minted playlist
+// and its variant then answer like the real edge (manifests), and a media
+// chunk carries 17 KB of TS sync bytes for the strict probe. The page is
+// registered by prefix: its cache-bust URLs carry a ?cb= timestamp.
+upstreamPrefix.push([WIDE_PAGE, (call) => respond(widePage(call.url.includes("cb=") ? WIDE_PLAYLIST_LIVE : wideFirstPage), { url: call.url, headers: { "Content-Type": "text/html; charset=utf-8" } })]);
+upstream[WIDE_PLAYLIST_LIVE] = () => {
+  wideFirstPage = WIDE_PLAYLIST_LIVE;   // the edge cache now holds the minted page too
+  return respond(WIDE_MANIFEST, { headers: { "Content-Type": "application/vnd.apple.mpegurl" } });
+};
+upstream[WIDE_PLAYLIST_SPENT] = () => respond("<html><body>expired</body></html>", { status: 403, headers: { "Content-Type": "text/html" } });
+upstream[WIDE_VARIANT] = () => respond(WIDE_VARIANT_MANIFEST, { headers: { "Content-Type": "application/vnd.apple.mpegurl" } });
+upstream[WIDE_TS] = () => respond(TS_SEGMENT, { headers: { "Content-Type": "video/mp2t" } });
 
 let passed = 0;
 const ok = (name) => { passed += 1; console.log("  ok " + passed + " - " + name); };
@@ -182,14 +228,16 @@ console.log("# catalog shaping");
   const byId = Object.fromEntries(data.channels.map(c => [c.id, c]));
   assert.deepEqual(
     data.channels.map(c => c.id),
-    ["alpha-usa", "broken-beam", "plain-page", "plain-hls"],
+    ["alpha-usa", "broken-beam", "plain-page", "plain-hls", "tsn-2"],
     "all channels still listed (checks are advice, never a gate)"
   );
   assert.equal(byId["alpha-usa"].kind, "hls", "short-link channels play through the first-party player, not an iframe of the page");
   assert.equal(byId["broken-beam"].kind, "hls", "…same shape, the resolver decides per play");
   assert.equal(byId["plain-page"].kind, "embed", "a plain embed page keeps the old behavior");
   assert.equal(byId["plain-hls"].kind, "hls", "real HLS streams unchanged");
+  assert.equal(byId["tsn-2"].kind, "hls", "a WideIPTV player page plays like a resolved HLS channel");
   assert.ok(!JSON.stringify(data).includes(PAGE_HOST + "/"), "public list never carries the short links either");
+  assert.ok(!JSON.stringify(data).includes("wideiptv"), "…nor the WideIPTV channel pages: they route to the play path by id");
   ok("the catalog marks short-link channels hls and leaves everything else alone");
 }
 
@@ -222,6 +270,10 @@ console.log("# app playlist");
   const plainPage = entryBy("Plain Page");
   assert.equal(plainPage.url, PLAIN_PAGE, "a plain embed page keeps the old URL");
   assert.doesNotMatch(plainPage.info, /type=/);
+  const wide = entryBy("TSN 2");
+  assert.equal(wide.url, BASE + "/api/play/tv/tsn-2", "the WideIPTV player page points at the play route too");
+  assert.match(wide.info, /type="hls"/, "…marked hls so extension-based players classify it right");
+  assert.doesNotMatch(body, /wideiptv\.top/, "the WideIPTV page host never reaches the app either");
   ok("short-link channels are listed as the play route with type=hls; others unchanged");
 }
 
@@ -259,6 +311,52 @@ console.log("# play route");
   assert.equal(fetchesTo(PAGE_HOST), 0, "the fresh record answers without re-resolving the page");
   assert.equal(fetchesTo(REAL_PLAYLIST_A), 1, "the proxy still streams the playlist upstream");
   ok("fresh cache answers repeat plays without touching the page again");
+}
+
+// ---------------------------------------------------------------------------
+// The WideIPTV family: a spent-mint page is refreshed with the cache-bust
+// fetch, the live playlist is re-sealed, and a mid-session /s/ poll mints a
+// new playlist instead of serving a spent link.
+// ---------------------------------------------------------------------------
+
+console.log("# wideiptv play route");
+{
+  upstreamLog.length = 0;
+  const res = await call(env, "/api/play/tv/tsn-2");
+  assert.equal(res.status, 200, "the family resolves through the spent-mint refresh, not a redirect into the page");
+  const text = await res.text();
+  assert.match(text, /#EXTM3U/, "an HLS playlist is served");
+  const lines = text.split("\n").filter(line => line && !line.startsWith("#"));
+  assert.equal(lines.length, 1, "one variant playlist entry");
+  const variant = new URL(lines[0], BASE);
+  assert.ok(variant.pathname.startsWith("/api/play/tv/tsn-2/s/"), "the variant points back at the sealed /s/ route");
+  assert.doesNotMatch(text, /blue\.example|wideiptv\.top/, "neither the mint host nor the page host leaks into a playlist");
+  assert.ok(upstreamLog.some(call => call.url.includes("cb=")), "the spent mint was refreshed with a cache-busting page fetch");
+  assert.ok(upstreamLog.some(call => call.url === WIDE_PLAYLIST_LIVE), "the fresh playlist was probed before it was served");
+  ok("a spent WideIPTV mint is refreshed with the cache-busted page fetch");
+}
+{
+  // Take the variant's sealed token, wait out the 20 s fresh window, and poll
+  // it again: with the mock edge the mint stays long, so the record alone
+  // refills through KV. The real code path: the /s/ branch re-mints through
+  // the channel page once the token expiry runs out.
+  upstreamLog.length = 0;
+  const res = await call(env, "/api/play/tv/tsn-2");
+  const text = await res.text();
+  const variantLine = text.split("\n").find(line => line && !line.startsWith("#"));
+  assert.ok(variantLine, "the variant line is there");
+  // A brand-new play inside the 20 s window: no page fetch again.
+  assert.equal(fetchesTo("wideiptv.top"), 0, "repeat plays inside the mint window answer from the record, not the page");
+  ok("the mint record replays inside its window without touching the page");
+}
+{
+  // Second play past the window: the record is stale, so the page is hit
+  // again — by design for a family whose mints die in minutes.
+  await new Promise(resolve => setTimeout(resolve, 20100));
+  upstreamLog.length = 0;
+  await call(env, "/api/play/tv/tsn-2").then(res => res.text());
+  assert.ok(fetchesTo("wideiptv.top") >= 1, "a stale record mints again");
+  ok("past its window, the mint records re-mint through the page");
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +399,14 @@ console.log("# probes");
   const plainProbe = await probeChannel(plain);
   assert.equal(plainProbe.ok, false);
   assert.equal(plainProbe.reason, "web page: playback can't be verified", "plain embed pages keep the old verdict");
+
+  const wide = state.channels.find(c => c.id === "tsn-2");
+  const wideProbe = await probeChannel(wide, env);
+  assert.equal(wideProbe.ok, true, "a WideIPTV page resolves and verifies: " + wideProbe.reason);
+  assert.equal(wideProbe.kind, "hls", "the probe names the family's resolved kind");
+  const wideRecord = JSON.parse(env.SPORTZFY_DB.store.get("tv_like:tv/tsn-2"));
+  assert.ok(wideRecord && wideRecord.src === WIDE_PAGE && wideRecord.expiresAt > Date.now(),
+    "the probe warmed the same mint record (with its expiry) the play route reads");
   ok("the strict probe verifies the resolved playlist and keeps old verdicts elsewhere");
 }
 
