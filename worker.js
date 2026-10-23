@@ -2618,16 +2618,24 @@ export function checkSummary(channels, health) {
 // M3U of the active channels for the app. Channels that need custom request
 // headers are left out: the app can't send them. Stream checks don't filter
 // this list (see activeChannels).
-function tvPlaylistM3u(channels) {
+function tvPlaylistM3u(channels, origin) {
   const clean = (value) => String(value ?? "").replace(/[\r\n",]+/g, " ").replace(/\s+/g, " ").trim();
   const lines = ["#EXTM3U"];
   for (const channel of channels) {
     if (channel.headers && Object.keys(channel.headers).length) continue;
-    const url = safeStreamUrl(channel.url);
+    // Short-link player pages don't work as media (nor as a page the app can
+    // render), so the playlist hands the app the Worker's play route instead:
+    // it resolves the page server-side to the real playlist (resolveTvLikeChannel)
+    // and streams it sealed. `type="hls"` marks the entry for players that
+    // classify by extension — the route has no media extension. Every other
+    // channel keeps its catalog URL, exactly as before.
+    const tvLike = looksLikeTvLikeChannel(channel.url);
+    const url = tvLike ? origin + "/api/play/tv/" + encodeURIComponent(String(channel.id)) : safeStreamUrl(channel.url);
     if (!url) continue;
     const name = clean(channel.name);
     const logo = safeStreamUrl(channel.logo);
-    lines.push('#EXTINF:-1 tvg-name="' + name + '" tvg-logo="' + logo + '" group-title="' + clean(channel.group) + '",' + name);
+    const type = tvLike ? ' type="hls"' : "";
+    lines.push('#EXTINF:-1 tvg-name="' + name + '" tvg-logo="' + logo + '" group-title="' + clean(channel.group) + '"' + type + "," + name);
     lines.push(url);
   }
   return lines.join("\n") + "\n";
@@ -3682,7 +3690,7 @@ async function handlePublicTv(request, env, url, ctx) {
   if (request.method === "GET" && url.pathname === "/api/tv/playlist.m3u") {
     const state = await readTvStateCached(env);
     const channels = orderedChannels(activeChannels(state?.channels || []));
-    return new Response(tvPlaylistM3u(channels), {
+    return new Response(tvPlaylistM3u(channels, url.origin), {
       headers: { "Content-Type": "audio/x-mpegurl; charset=utf-8", "Cache-Control": "public, max-age=300" }
     });
   }

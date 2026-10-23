@@ -194,6 +194,38 @@ console.log("# catalog shaping");
 }
 
 // ---------------------------------------------------------------------------
+// The M3U the app reads: short-link channels are handed the play route, not
+// the ad page, and their entries carry type="hls" so extension-based players
+// (the app) classify them right. Everything else is byte-identical to before.
+// ---------------------------------------------------------------------------
+
+console.log("# app playlist");
+{
+  const res = await call(env, "/api/tv/playlist.m3u");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("Content-Type") || "", /mpegurl/, "an M3U playlist");
+  const body = await res.text();
+  assert.doesNotMatch(body, new RegExp(PAGE_HOST), "the ad host never appears in the app's playlist");
+  const entryBy = (name) => {
+    const index = body.split("\n").findIndex(line => line.includes(", " + name) || line.endsWith("," + name));
+    return { info: body.split("\n")[index], url: body.split("\n")[index + 1] };
+  };
+  const alpha = entryBy("Alpha USA");
+  assert.equal(alpha.url, BASE + "/api/play/tv/alpha-usa", "the short-link channel points at the play route");
+  assert.match(alpha.info, /type="hls"/, "…marked hls so extension-based players classify it right");
+  const broken = entryBy("Broken Beam");
+  assert.equal(broken.url, BASE + "/api/play/tv/broken-beam", "an unresolvable short link still hides behind the play route");
+  assert.match(broken.info, /type="hls"/);
+  const plainHls = entryBy("Plain HLS");
+  assert.equal(plainHls.url, PLAIN_M3U, "real HLS streams keep the catalog URL");
+  assert.doesNotMatch(plainHls.info, /type=/, "…and need no type attribute");
+  const plainPage = entryBy("Plain Page");
+  assert.equal(plainPage.url, PLAIN_PAGE, "a plain embed page keeps the old URL");
+  assert.doesNotMatch(plainPage.info, /type=/);
+  ok("short-link channels are listed as the play route with type=hls; others unchanged");
+}
+
+// ---------------------------------------------------------------------------
 // Playback: the playlist is resolved and served through the sealed proxy.
 // ---------------------------------------------------------------------------
 

@@ -13,8 +13,8 @@ android {
         applicationId = "com.sportzfy.live"
         minSdk = 24
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.2.1"
 
         // Owner-editable remote config, served by the Worker and edited from the
         // admin "Android app" page (see README "Remote control").
