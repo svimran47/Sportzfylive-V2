@@ -94,7 +94,7 @@ object ChannelParser {
                 logo = dto.logo,
                 url = dto.url,
                 category = dto.category,
-                format = StreamFormat.fromHint(dto.type.text()),
+                format = streamFormatFor(dto.type.text(), dto.drm),
                 country = dto.country,
                 sandboxed = dto.sandbox.isTrue(),
                 drm = dto.drm,
@@ -137,8 +137,9 @@ object ChannelParser {
                         country = groupTitle,
                         // A `type` attribute (the Worker's playlist) marks entries
                         // whose URL has no media extension, e.g. the play route
-                        // for short-link channels.
-                        format = StreamFormat.fromHint(attributes["type"]),
+                        // for short-link channels; a `drm` attribute says DASH
+                        // on its own.
+                        format = streamFormatFor(attributes["type"], attributes["drm"]),
                         // The Worker's playlist carries a ClearKey DASH
                         // channel's license route here.
                         drm = attributes["drm"],
@@ -150,6 +151,18 @@ object ChannelParser {
         }
         return entries
     }
+
+    /**
+     * The stream format a channel entry names: its `type` hint when there is
+     * one, otherwise DASH when it carries a `drm` license route — a ClearKey
+     * channel is by definition a DASH manifest, and the attribute is the
+     * signal even before the route itself validated (a malformed route only
+     * drops the key, not the format). Null when neither applies: the URL's
+     * extension decides at play time.
+     */
+    private fun streamFormatFor(typeHint: String?, drm: String?): StreamFormat? =
+        StreamFormat.fromHint(typeHint)
+            ?: drm?.takeIf { it.isNotBlank() }?.let { StreamFormat.DASH }
 
     /** Index of the comma that starts an `#EXTINF` title: the first one outside quoted attributes, or -1. */
     private fun titleComma(info: String): Int {
