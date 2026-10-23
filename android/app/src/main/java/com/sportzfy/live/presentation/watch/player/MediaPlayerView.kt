@@ -19,16 +19,17 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
+import androidx.media3.exoplayer.drm.ExoMediaDrm.KeyRequest
+import androidx.media3.exoplayer.drm.ExoMediaDrm.ProvisionRequest
 import androidx.media3.exoplayer.drm.FrameworkMediaDrm
-import androidx.media3.exoplayer.drm.KeyRequest
 import androidx.media3.exoplayer.drm.MediaDrmCallback
-import androidx.media3.exoplayer.drm.ProvisionRequest
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.compose.PlayerSurface
 import androidx.media3.ui.compose.SURFACE_TYPE_SURFACE_VIEW
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import com.sportzfy.live.domain.model.StreamFormat
+import java.io.IOException
 import java.util.UUID
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -193,7 +194,7 @@ private fun clearKeySessionManager(licenseUrl: String, okHttpClient: OkHttpClien
                 override fun executeKeyRequest(uuid: UUID, request: KeyRequest): ByteArray =
                     okHttpClient.newCall(Request.Builder().url(licenseUrl).build()).execute().use { response ->
                         check(response.isSuccessful) { "ClearKey license request failed: ${response.code}" }
-                        response.body.bytes()
+                        response.body?.bytes() ?: throw IOException("Empty ClearKey license response")
                     }
 
                 // ClearKey never provisions: provision requests don't happen.
