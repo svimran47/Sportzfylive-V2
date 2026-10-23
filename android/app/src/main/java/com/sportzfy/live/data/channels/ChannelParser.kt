@@ -51,7 +51,10 @@ private class RawChannel(
  * (`const channels = [...];`), so the outermost JSON array is cut out of it
  * first; a plain JSON array works too. An M3U playlist (`#EXTM3U` with
  * `#EXTINF` entries, as IPTV providers publish) is read as well: the title,
- * `tvg-logo` and `group-title` (or `#EXTGRP`) of each entry. The group is
+ * `tvg-logo` and `group-title` (or `#EXTGRP`) of each entry, and a `type`
+ * attribute (`"hls"`…) when the entry names one — as the Worker's
+ * `/api/tv/playlist.m3u` does for the short-link player pages it routes
+ * through `/api/play/tv/:id`. The group is
  * read as the channel's country as well, which is how `sports.m3u` files them.
  *
  * Entries without a name or an http(s) stream URL are skipped, as are repeated
@@ -128,6 +131,10 @@ object ChannelParser {
                         category = groupTitle,
                         // sports.m3u files every channel under its country.
                         country = groupTitle,
+                        // A `type` attribute (the Worker's playlist) marks entries
+                        // whose URL has no media extension, e.g. the play route
+                        // for short-link channels.
+                        format = StreamFormat.fromHint(attributes["type"]),
                     )
                     info = null
                     group = null

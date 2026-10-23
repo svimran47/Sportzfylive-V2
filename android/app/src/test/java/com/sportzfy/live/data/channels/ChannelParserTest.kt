@@ -114,6 +114,26 @@ class ChannelParserTest {
     }
 
     @Test
+    fun `an M3U type attribute sets the stream format, read loosely`() {
+        val raw = "#EXTM3U\n" +
+            "#EXTINF:-1 tvg-name=\"Alpha\" group-title=\"Sports\" type=\"hls\",Alpha\n" +
+            "https://tv.example/api/play/tv/alpha\n" +
+            "#EXTINF:-1 type=\" dash \",Dash\n" +
+            "https://cdn.example/manifest\n" +
+            "#EXTINF:-1 type=\"rtmp\",Unknown\n" +
+            "https://tv.example/unknown\n" +
+            "#EXTINF:-1,Untyped\n" +
+            "https://tv.example/untyped\n"
+        val channels = parse(raw)!!
+        assertEquals(
+            listOf(StreamFormat.HLS, StreamFormat.DASH, null, null),
+            channels.map { it.streamFormat },
+        )
+        // The page's entries classify by extension; a type hint wins there too.
+        assertEquals(listOf("https://tv.example/api/play/tv/alpha"), channels.take(1).map { it.streamUrl })
+    }
+
+    @Test
     fun `an M3U playlist with no entries is an empty list, not an error`() {
         assertEquals(emptyList<Any>(), parse("#EXTM3U\n"))
     }
